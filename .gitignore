@@ -1,0 +1,39 @@
+# Go build artifacts
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local configuration files (containing sensitive information)
+config.yaml
+.env
+*.local.yaml
+
+# Dependency directories
+/vendor/
+/go.sum
+
+# Compiled Object files, Static and Dynamic libs
+*.o
+*.a
+
+# Log files
+*.log
+
+# Generated files
+/testdata/output/
+
+# OS specific files
+.DS_Store
+Thumbs.db 
