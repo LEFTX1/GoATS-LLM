@@ -7,6 +7,7 @@ import (
 	"ai-agent-go/pkg/config"
 	"ai-agent-go/pkg/parser"
 	"ai-agent-go/pkg/storage"
+	"ai-agent-go/pkg/storage/singleton"
 	"ai-agent-go/pkg/types"
 )
 
@@ -100,7 +101,7 @@ type VectorStoreAdapter struct {
 
 // NewVectorStoreAdapter 创建新的向量存储适配器
 func NewVectorStoreAdapter(cfg *config.Config) (*VectorStoreAdapter, error) {
-	store, err := storage.NewResumeVectorStore(cfg)
+	store, err := singleton.GetResumeVectorStore(cfg)
 	if err != nil {
 		return nil, err
 	}

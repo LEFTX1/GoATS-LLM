@@ -1,8 +1,11 @@
 # 阿里云千问API配置
 aliyun:
-  api_key: "your_api_key_here"  # 请替换为您的阿里云API密钥
+  api_key: "sk-e0d7dda93eb14ff5bcbf43f484fe6736"
   api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-  model: "qwen-turbo"
+  model: "qwen-turbo-latest"
+  # 任务专用模型配置
+  task_models:
+    job_evaluate: "qwen-turbo-latest"  # 简历评估任务使用更高级模型
 
 # Qdrant向量数据库配置
 qdrant:
@@ -10,4 +13,45 @@ qdrant:
   collection: "resumes"
   dimension: 1024
 
-# 注意: 复制此文件为 config.yaml 并填入您的实际 API 密钥 
+# RabbitMQ消息队列配置
+rabbitmq:
+  host: "localhost"
+  port: 5672
+  username: "guest"
+  password: "guest"
+  vhost: "/"
+  # 交换机配置
+  resume_events_exchange: "resume.events.exchange"
+  processing_events_exchange: "resume.processing.exchange"
+  # 队列配置
+  raw_resume_queue: "q.raw_resume_uploaded"
+  llm_parsing_queue: "q.resume_for_llm_parsing"
+  # 路由键配置
+  uploaded_routing_key: "resume.uploaded"
+  parsed_routing_key: "resume.parsed"
+
+# MinIO对象存储配置
+minio:
+  endpoint: "localhost:9000"
+  access_key: "minioadmin"
+  secret_key: "minioadmin123"
+  secure: false
+  # 桶配置
+  originals_bucket: "originals"
+  parsed_text_bucket: "parsed-text"
+
+# MySQL数据库配置
+mysql:
+  host: "localhost"
+  port: 3306
+  username: "root"
+  password: "your_mysql_password"
+  database: "resume_processor"
+
+# 注意: 复制此文件为 config.yaml 并填入您的实际 API 密钥
+
+# 服务器配置
+server:
+  address: ":8080" # HTTP服务监听地址和端口
+
+# LLM解析器配置 (示例) 

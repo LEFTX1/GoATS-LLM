@@ -1,4 +1,4 @@
-package processor
+package parser
 
 import (
 	"context"
@@ -55,7 +55,7 @@ func TestLLMJobEvaluatorWithRealModel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	llmModel, err := initRealLLM(ctx)
+	llmModel, err := initRealLLMForJobEvaluatorTest(ctx)
 	if err != nil {
 		if strings.Contains(err.Error(), "API 密钥不能为空") || strings.Contains(err.Error(), "LLM_API_KEY") {
 			t.Skipf("跳过真实LLM测试: %v。请设置 LLM_API_KEY 环境变量。", err)
@@ -126,7 +126,7 @@ func TestInvalidResponseWithRealModel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	llmModel, err := initRealLLM(ctx)
+	llmModel, err := initRealLLMForJobEvaluatorTest(ctx)
 	if err != nil {
 		if strings.Contains(err.Error(), "API 密钥不能为空") || strings.Contains(err.Error(), "LLM_API_KEY") {
 			t.Skipf("跳过真实LLM测试: %v。请设置 LLM_API_KEY 环境变量。", err)
@@ -166,7 +166,7 @@ func TestKeywordMatchingWithRealLLM(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	llmModel, err := initRealLLM(ctx)
+	llmModel, err := initRealLLMForJobEvaluatorTest(ctx)
 	if err != nil {
 		if strings.Contains(err.Error(), "API 密钥不能为空") || strings.Contains(err.Error(), "LLM_API_KEY") {
 			t.Skipf("跳过真实LLM测试: %v。请设置 LLM_API_KEY 环境变量。", err)
@@ -238,9 +238,9 @@ func TestRealLLMJobEvaluator(t *testing.T) {
 	t.Log("==================== 真实LLM岗位-简历匹配评估测试 ====================")
 	startTime := time.Now()
 
-	llmModel, err := initRealLLM(ctx)
+	llmModel, err := initRealLLMForJobEvaluatorTest(ctx)
 	if err != nil {
-		// 如果环境变量 LLM_API_KEY 未设置，initRealLLM 会返回错误，此时应跳过测试
+		// 如果环境变量 LLM_API_KEY 未设置，initRealLLMForJobEvaluatorTest 会返回错误，此时应跳过测试
 		if strings.Contains(err.Error(), "API 密钥不能为空") || strings.Contains(err.Error(), "LLM_API_KEY") {
 			t.Skipf("跳过真实LLM测试: %v。请设置 LLM_API_KEY 环境变量。", err)
 		}
@@ -613,8 +613,8 @@ func testJobResumeMatch(t *testing.T, ctx context.Context, evaluator *LLMJobEval
 	}
 }
 
-// initRealLLM 初始化真实的大语言模型
-func initRealLLM(ctx context.Context) (model.ChatModel, error) {
+// initRealLLMForJobEvaluatorTest 初始化真实的大语言模型
+func initRealLLMForJobEvaluatorTest(ctx context.Context) (model.ChatModel, error) {
 	// 打印当前工作目录，帮助定位配置文件路径问题
 	cwd, err := os.Getwd()
 	if err != nil {

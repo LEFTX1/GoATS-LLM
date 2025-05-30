@@ -3,104 +3,164 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"ai-agent-go/pkg/agent" // Our custom AliyunQwenChatModel and ExampleTool
+	"ai-agent-go/pkg/agent"
+	"ai-agent-go/pkg/api"
+	"ai-agent-go/pkg/config"
+	"ai-agent-go/pkg/handler"
+	"ai-agent-go/pkg/parser"
+	"ai-agent-go/pkg/storage/singleton"
 
-	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent/react"
-	"github.com/cloudwego/eino/schema"
-)
-
-const (
-	ALIYUN_QWEN_API_KEY = "sk-e0d7dda93eb14ff5bcbf43f484fe6736" // Replace with your actual key or load from env
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/common/utils"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
 func main() {
-	dashscopeAPIKey := ALIYUN_QWEN_API_KEY
-
-	if dashscopeAPIKey == "" {
-		log.Fatal("错误: ALIYUN_QWEN_API_KEY 常量为空。请在 main.go 中设置它或从环境变量加载。")
-	}
-	log.Println("ALIYUN_QWEN_API_KEY (硬编码) 加载成功。")
-
 	ctx := context.Background()
 
-	// 1. 初始化 LLM 客户端 (阿里云通义千问)
-	// Ensure your AliyunQwenChatModel implements eino's model.ChatModel interface correctly.
-	llm, err := agent.NewAliyunQwenChatModel(dashscopeAPIKey, "qwen-plus", "") // Using qwen-plus
+	// 1. 加载配置
+	cfg, err := config.LoadConfig("config.yaml")
 	if err != nil {
-		log.Fatalf("创建 AliyunQwenChatModel 失败: %v", err)
+		log.Fatalf("加载配置失败: %v", err)
 	}
-	log.Println("阿里云通义千问 LLM 客户端初始化完毕。")
+	log.Printf("配置加载成功")
 
-	// 2. 初始化工具
-	// Ensure your ExampleTool implements eino's tool.BaseTool and tool.InvokableTool interfaces.
-	exampleTool := agent.NewExampleTool()
-	log.Printf("工具初始化完毕: %s", exampleTool.Name)
-
-	// 3. 配置 Eino ToolsNode
-	toolsNodeCfg := compose.ToolsNodeConfig{
-		Tools: []tool.BaseTool{exampleTool}, // Pass the tool instance
-	}
-	log.Println("Eino ToolsNodeConfig 配置完毕。")
-
-	// 4. (可选) 定义 MessageModifier 来添加系统提示等
-	msgModifier := func(ctxMod context.Context, input []*schema.Message) []*schema.Message {
-		// Create a new slice with capacity for the system message and existing messages.
-		res := make([]*schema.Message, 0, len(input)+1)
-		// Add system message at the beginning.
-		res = append(res, &schema.Message{Role: schema.RoleType("system"), Content: "你是一个天气查询助手。你需要思考如何使用工具来回答用户关于天气的多轮问题。"})
-		// Append original messages.
-		res = append(res, input...)
-		log.Printf("[MessageModifier] 系统提示已添加。处理前 %d 条消息，处理后 %d 条消息。", len(input), len(res))
-		return res
-	}
-
-	// 5. 创建 Eino React Agent
-	reactAgent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: llm,          // Your ChatModel implementation
-		ToolsConfig:      toolsNodeCfg, // Your tools configuration
-		MessageModifier:  msgModifier,  // Optional: function to modify messages before calling LLM
-		MaxStep:          12,           // Optional: Max steps for the agent. Default is usually okay.
-		// ToolReturnDirectly: nil,      // Optional: map[string]struct{}{ "tool_name_to_return_directly": {}}
-		// StreamToolCallChecker: nil, // Optional: custom function to check for tool calls in stream
-	})
+	// 2. 初始化各种适配器 - 使用单例模式
+	// 2.1 MinIO
+	minioAdapter, err := singleton.GetMinIOAdapter(&cfg.MinIO)
 	if err != nil {
-		log.Fatalf("创建 Eino React Agent 失败: %v", err)
+		log.Fatalf("初始化MinIO适配器失败: %v", err)
 	}
-	log.Println("Eino React Agent 初始化完毕。")
+	log.Printf("MinIO适配器初始化成功")
 
-	// 6. 运行 Agent
-	userInput := "旧金山今天和明天的天气怎么样？还有上海后天呢？"
-	log.Printf("向 Eino React Agent 发送用户输入: %s", userInput)
-
-	// Eino React Agent's Generate method takes a slice of *schema.Message
-	initialMessages := []*schema.Message{
-		{Role: schema.RoleType("user"), Content: userInput},
-	}
-
-	// Call Generate on the reactAgent
-	finalMessage, err := reactAgent.Generate(ctx, initialMessages)
+	// 2.2 RabbitMQ
+	mqAdapter, err := singleton.GetRabbitMQAdapter(&cfg.RabbitMQ)
 	if err != nil {
-		log.Fatalf("Eino React Agent 执行失败: %v", err)
+		log.Fatalf("初始化RabbitMQ适配器失败: %v", err)
 	}
+	log.Printf("RabbitMQ适配器初始化成功")
 
-	log.Printf("Eino React Agent 执行成功。最终答案:")
-	if finalMessage != nil {
-		log.Printf("  Role: %s", finalMessage.Role)
-		log.Printf("  Content: %s", finalMessage.Content)
-		if len(finalMessage.ToolCalls) > 0 {
-			// For a final answer from React agent, ToolCalls should ideally be empty.
-			log.Printf("  警告: 最终消息中包含 %d 个工具调用 (通常不应出现)。", len(finalMessage.ToolCalls))
-			for i, tc := range finalMessage.ToolCalls {
-				log.Printf("    ToolCall %d: ID=%s, Type=%s, Function=%s, Args=%s", i, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments)
-			}
-		}
+	// 2.3 MySQL
+	mysqlAdapter, err := singleton.GetMySQLAdapter(&cfg.MySQL)
+	if err != nil {
+		log.Fatalf("初始化MySQL适配器失败: %v", err)
+	}
+	log.Printf("MySQL适配器初始化成功")
+
+	// 2.4 Qdrant (如果需要)
+	// 初始化Qdrant客户端，但不使用返回的实例
+	// 这样可以确保单例已被创建，方便其他组件使用
+	_, err = singleton.GetQdrantClient(cfg)
+	if err != nil {
+		log.Printf("初始化Qdrant客户端失败: %v", err)
+		log.Printf("Qdrant不是必需的，将继续运行其他组件")
 	} else {
-		// This case might occur if the agent logic doesn't produce a final message under some conditions.
-		log.Println("最终消息为 nil。")
+		log.Printf("Qdrant客户端初始化成功")
 	}
 
-	log.Println("----- Eino React Agent 执行结束 ----- Logging complete history via callbacks would be typical here if needed.")
+	// 3. 初始化模型客户端
+	// 3.1 阿里云通义千问LLM客户端
+	llm, err := agent.NewAliyunQwenChatModel(cfg.Aliyun.APIKey, cfg.Aliyun.Model, cfg.Aliyun.APIURL)
+	if err != nil {
+		log.Fatalf("初始化LLM客户端失败: %v", err)
+	}
+	log.Printf("LLM客户端初始化成功")
+
+	// 3.2 PDF解析器
+	pdfExtractor, err := parser.NewEinoPDFTextExtractor(ctx)
+	if err != nil {
+		log.Fatalf("初始化PDF解析器失败: %v", err)
+	}
+	log.Printf("PDF解析器初始化成功")
+
+	// 3.3 LLM简历分块器
+	llmChunker := parser.NewLLMResumeChunker(llm)
+	log.Printf("LLM简历分块器初始化成功")
+
+	// 4. 初始化业务处理器
+	resumeHandler := handler.NewResumeHandler(
+		cfg,
+		minioAdapter,
+		mqAdapter,
+		mysqlAdapter,
+		pdfExtractor,
+		llmChunker,
+	)
+	log.Printf("简历处理器初始化成功")
+
+	// 5. 初始化API处理器
+	resumeAPIHandler := api.NewResumeAPIHandler(resumeHandler)
+	log.Printf("API处理器初始化成功")
+
+	// 6. 启动消费者
+	// 6.1 简历上传消费者
+	if err := resumeHandler.StartResumeUploadConsumer(ctx, 10, 5*time.Second); err != nil {
+		log.Fatalf("启动简历上传消费者失败: %v", err)
+	}
+	log.Printf("简历上传消费者启动成功")
+
+	// 6.2 LLM解析消费者
+	if err := resumeHandler.StartLLMParsingConsumer(ctx, 2); err != nil {
+		log.Fatalf("启动LLM解析消费者失败: %v", err)
+	}
+	log.Printf("LLM解析消费者启动成功")
+
+	// 7. 启动Hertz HTTP服务器
+	h := server.Default(server.WithHostPorts(cfg.Server.Address))
+
+	// 定义API路由组
+	apiGroup := h.Group("/api/v1")
+	{
+		// 简历上传接口
+		apiGroup.POST("/resume/upload", resumeAPIHandler.UploadResume)
+		// 可以添加健康检查等其他接口
+		apiGroup.GET("/health", func(c context.Context, ctx *app.RequestContext) {
+			ctx.JSON(consts.StatusOK, utils.H{"status": "OK"})
+		})
+	}
+
+	log.Printf("HTTP服务器正在启动，监听地址: %s", cfg.Server.Address)
+	go func() {
+		h.Spin()
+	}()
+
+	// 8. 等待信号退出
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	log.Printf("收到退出信号，正在关闭资源...")
+
+	// 9. 清理资源
+	// 优雅关闭Hertz服务器
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Hertz服务器关闭失败: %v", err)
+	}
+	log.Printf("Hertz服务器已关闭")
+
+	// 所有资源都由单例模式管理，只需要重置单例即可释放资源
+	// 这里显式关闭RabbitMQ和MySQL连接以确保正确释放
+	if err := mqAdapter.Close(); err != nil {
+		log.Printf("关闭RabbitMQ适配器失败: %v", err)
+	}
+
+	if err := mysqlAdapter.Close(); err != nil {
+		log.Printf("关闭MySQL适配器失败: %v", err)
+	}
+
+	// 重置所有单例
+	singleton.ResetMinIOAdapter()
+	singleton.ResetMySQLAdapter()
+	singleton.ResetRabbitMQAdapter()
+	singleton.ResetQdrantClient()
+
+	log.Printf("优雅退出完成")
 }

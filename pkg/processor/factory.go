@@ -141,9 +141,14 @@ func CreateFullProcessor(
 
 	// 3. 创建嵌入器（如果提供了API密钥）
 	if apiKey != "" {
-		aliyunEmbedder, err := parser.NewAliyunEmbedder(apiKey,
-			parser.WithAliyunDimensions(dimensions),
-			parser.WithAliyunModel("text-embedding-v3"))
+		// 创建嵌入配置
+		embeddingCfg := config.EmbeddingConfig{
+			Model:      "text-embedding-v3",
+			Dimensions: dimensions,
+			BaseURL:    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+		}
+
+		aliyunEmbedder, err := parser.NewAliyunEmbedder(apiKey, embeddingCfg)
 		if err != nil {
 			return nil, fmt.Errorf("创建嵌入模型失败: %w", err)
 		}

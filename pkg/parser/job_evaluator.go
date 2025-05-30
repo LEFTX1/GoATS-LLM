@@ -1,4 +1,4 @@
-package processor
+package parser
 
 import (
 	"context"
@@ -211,7 +211,8 @@ func (e *LLMJobEvaluator) generateFewShotExamples() {
     "简历中未提及单元测试和CI/CD相关经验"
   ],
   "resume_summary_for_jd": "刘芳拥有5年Java开发经验，在电商微服务、数据库优化和高并发处理方面有丰富实践，技术栈完全匹配岗位需求，且有可量化的性能优化成果，是该职位的理想人选。"
-}`
+}
+`
 }
 
 // Evaluate 函数执行JD与简历的匹配评估
@@ -251,7 +252,7 @@ func (e *LLMJobEvaluator) Evaluate(
 	}
 
 	// 3. 解析LLM响应
-	jsonStr := extractJSON(response.Content)
+	jsonStr := extractJSONFromEvaluatorResponse(response.Content)
 	if jsonStr == "" {
 		return nil, fmt.Errorf("LLMJobEvaluator: failed to extract JSON from LLM response: %s", response.Content)
 	}
@@ -270,6 +271,15 @@ func (e *LLMJobEvaluator) Evaluate(
 }
 
 // EvaluateMatch 实现JobMatchEvaluator接口，评估简历与岗位的匹配度
+// Note: This JobMatchEvaluation struct might need to be moved to a more generic place, e.g., a types package if used by other components.
+type JobMatchEvaluation struct {
+	MatchScore         int      `json:"match_score"`
+	MatchHighlights    []string `json:"match_highlights"`
+	PotentialGaps      []string `json:"potential_gaps"`
+	ResumeSummaryForJD string   `json:"resume_summary_for_jd"`
+	EvaluatedAt        int64    `json:"evaluated_at"` // Unix timestamp (seconds)
+}
+
 func (e *LLMJobEvaluator) EvaluateMatch(ctx context.Context, jobDescription string, resumeText string) (*JobMatchEvaluation, error) {
 	// 调用内部评估方法
 	result, err := e.Evaluate(ctx, jobDescription, resumeText)
@@ -340,8 +350,8 @@ func validateEvaluationResult(result *LLMJobMatchEvaluation) error {
 	return nil
 }
 
-// extractJSON 从文本中提取JSON字符串
-func extractJSON(text string) string {
+// extractJSONFromEvaluatorResponse 从文本中提取JSON字符串
+func extractJSONFromEvaluatorResponse(text string) string {
 	start := strings.Index(text, "{")
 	if start == -1 {
 		return ""

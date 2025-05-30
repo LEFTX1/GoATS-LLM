@@ -115,13 +115,6 @@ func WithDetailedBasicInfo(detailed bool) LLMChunkerOption {
 	}
 }
 
-// WithCustomPromptTemplate 设置自定义提示词模板
-func WithCustomPromptTemplate(template string) LLMChunkerOption {
-	return func(c *LLMResumeChunker) {
-		c.promptTemplate = template
-	}
-}
-
 // WithCustomFewShotExamples 设置自定义少样本示例
 func WithCustomFewShotExamples(examples string) LLMChunkerOption {
 	return func(c *LLMResumeChunker) {
