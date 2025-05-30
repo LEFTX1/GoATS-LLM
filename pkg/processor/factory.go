@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"ai-agent-go/pkg/agent"
 	"ai-agent-go/pkg/config"
@@ -17,9 +18,18 @@ func init() {
 	var err error
 	appConfig, err = config.LoadConfig("")
 	if err != nil {
-		// 如果配置文件不存在，则不会初始化配置
-		// 此时程序将回退到使用环境变量或其他默认值
-		fmt.Printf("警告: 加载配置文件失败: %v\n", err)
+		// 只在非测试环境中输出警告
+		isTest := false
+		for _, arg := range os.Args {
+			if strings.Contains(arg, "test") {
+				isTest = true
+				break
+			}
+		}
+
+		if !isTest {
+			fmt.Printf("警告: 加载配置文件失败: %v\n", err)
+		}
 	}
 }
 

@@ -45,6 +45,27 @@ type ProcessResult struct {
 	Stats map[string]interface{}
 }
 
+// JobMatchEvaluation 岗位匹配评估结果
+type JobMatchEvaluation struct {
+	// 匹配分数 (0-100)
+	MatchScore int `json:"match_score"`
+
+	// 匹配亮点
+	MatchHighlights []string `json:"match_highlights"`
+
+	// 潜在不足
+	PotentialGaps []string `json:"potential_gaps"`
+
+	// 针对岗位的简历摘要
+	ResumeSummaryForJD string `json:"resume_summary_for_jd"`
+
+	// 评估时间
+	EvaluatedAt int64 `json:"evaluated_at"`
+
+	// 评估ID
+	EvaluationID string `json:"evaluation_id,omitempty"`
+}
+
 // PDFExtractor PDF提取器接口
 type PDFExtractor interface {
 	// 从PDF文件提取文本
@@ -55,6 +76,12 @@ type PDFExtractor interface {
 type ResumeChunker interface {
 	// 将简历文本分块
 	ChunkResume(ctx context.Context, text string) ([]*parser.ResumeSection, map[string]string, error)
+}
+
+// JobMatchEvaluator 岗位匹配评估器接口
+type JobMatchEvaluator interface {
+	// 评估简历与岗位的匹配度
+	EvaluateMatch(ctx context.Context, jobDescription string, resumeText string) (*JobMatchEvaluation, error)
 }
 
 // Embedder 向量嵌入器接口
