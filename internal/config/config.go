@@ -121,6 +121,9 @@ type RabbitMQConfig struct {
 	PrefetchCount            int    `yaml:"prefetch_count"`
 	RetryInterval            string `yaml:"retry_interval"`
 	MaxRetries               int    `yaml:"max_retries"`
+	// 新增消费者工作线程和批量处理超时配置
+	ConsumerWorkers map[string]int    `yaml:"consumer_workers"` // 例如: {"upload_consumer_workers": 5, "llm_consumer_workers": 3}
+	BatchTimeouts   map[string]string `yaml:"batch_timeouts"`   // 例如: {"upload_batch_timeout": "10s"}
 }
 
 // MinIOConfig MinIO配置结构
@@ -416,6 +419,13 @@ func createDefaultConfig() *Config {
 	config.RabbitMQ.PrefetchCount = 10
 	config.RabbitMQ.RetryInterval = "5s"
 	config.RabbitMQ.MaxRetries = 3
+	config.RabbitMQ.ConsumerWorkers = map[string]int{
+		"upload_consumer_workers": 5,
+		"llm_consumer_workers":    3,
+	}
+	config.RabbitMQ.BatchTimeouts = map[string]string{
+		"upload_batch_timeout": "5s",
+	}
 
 	// MinIO默认配置
 	config.MinIO.Endpoint = "localhost:9000"

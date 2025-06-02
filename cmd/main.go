@@ -2,8 +2,9 @@ package main
 
 import (
 	"ai-agent-go/internal/agent"
+	"ai-agent-go/internal/api/handler"
+	"ai-agent-go/internal/api/router"
 	"ai-agent-go/internal/config"
-	"ai-agent-go/internal/handler"
 	"ai-agent-go/internal/logger"
 	parser2 "ai-agent-go/internal/parser"
 	"ai-agent-go/internal/processor"
@@ -16,10 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/utils"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
 // @title           AI Agent API
@@ -52,9 +50,21 @@ func main() {
 	logger.Info().Msg("简历处理器初始化成功")
 
 	// 4. 启动简历处理消费者
-	// 4.1 上传消费者 (批量)
+	// 4.1 上传消费者
 	go func() {
-		err := resumeHandler.StartResumeUploadConsumer(context.Background(), 10, 5*time.Second)
+		// 从配置中读取上传消费者的工作线程数，默认为10
+		uploadConsumerWorkers := 10
+		if workers, ok := cfg.RabbitMQ.ConsumerWorkers["upload_consumer_workers"]; ok {
+			uploadConsumerWorkers = workers
+		}
+		// 从配置中读取上传消费者的批量处理超时时间，默认为5秒
+		batchTimeout := 5 * time.Second
+		if timeoutStr, ok := cfg.RabbitMQ.BatchTimeouts["upload_batch_timeout"]; ok {
+			if parsedTimeout, parseErr := time.ParseDuration(timeoutStr); parseErr == nil {
+				batchTimeout = parsedTimeout
+			}
+		}
+		err := resumeHandler.StartResumeUploadConsumer(context.Background(), uploadConsumerWorkers, batchTimeout)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("启动简历上传消费者失败")
 		}
@@ -62,7 +72,12 @@ func main() {
 
 	// 4.2 LLM解析消费者
 	go func() {
-		err := resumeHandler.StartLLMParsingConsumer(context.Background(), 5)
+		// 从配置中读取LLM解析消费者的工作线程数，默认为5
+		llmConsumerWorkers := 5
+		if workers, ok := cfg.RabbitMQ.ConsumerWorkers["llm_consumer_workers"]; ok {
+			llmConsumerWorkers = workers
+		}
+		err := resumeHandler.StartLLMParsingConsumer(context.Background(), llmConsumerWorkers)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("启动LLM解析消费者失败")
 		}
@@ -78,53 +93,8 @@ func main() {
 		server.WithHostPorts(cfg.Server.Address),
 	)
 
-	// 6. 添加路由
-	api := h.Group("/api/v1")
-	api.POST("/resume/upload", func(c context.Context, ctx *app.RequestContext) {
-		// 获取上传的文件
-		fileHeader, err := ctx.FormFile("file")
-		if err != nil {
-			ctx.JSON(consts.StatusBadRequest, utils.H{"error": "文件未找到"})
-			return
-		}
-
-		// 获取目标岗位ID
-		targetJobID := ctx.PostForm("target_job_id")
-		// 获取来源渠道
-		sourceChannel := ctx.PostForm("source_channel")
-		if sourceChannel == "" {
-			sourceChannel = "web_upload"
-		}
-
-		// 打开文件
-		file, err := fileHeader.Open()
-		if err != nil {
-			ctx.JSON(consts.StatusInternalServerError, utils.H{"error": "打开文件失败"})
-			return
-		}
-		defer file.Close()
-
-		// 处理上传
-		resp, err := resumeHandler.HandleResumeUpload(
-			c,
-			file,
-			fileHeader.Size,
-			fileHeader.Filename,
-			targetJobID,
-			sourceChannel,
-		)
-		if err != nil {
-			ctx.JSON(consts.StatusInternalServerError, utils.H{"error": err.Error()})
-			return
-		}
-
-		ctx.JSON(consts.StatusOK, resp)
-	})
-
-	// 添加健康检查
-	api.GET("/health", func(c context.Context, ctx *app.RequestContext) {
-		ctx.JSON(consts.StatusOK, utils.H{"status": "ok"})
-	})
+	// 6. 使用新的router包注册路由
+	router.RegisterRoutes(h, resumeHandler)
 
 	// 7. 启动HTTP服务器
 	go func() {
@@ -165,7 +135,7 @@ func initLogger() {
 	}
 
 	// 如果配置文件成功加载，使用配置文件中的日志设置
-	if err == nil && cfg != nil {
+	if err == nil && cfg != nil && cfg.Logger.Level != "" { // 检查cfg.Logger.Level是否为空
 		logConfig.Level = cfg.Logger.Level
 		logConfig.Format = cfg.Logger.Format
 		logConfig.TimeFormat = cfg.Logger.TimeFormat
@@ -175,6 +145,8 @@ func initLogger() {
 		logConfig.Level = "info"
 		logConfig.Format = "json"
 		logConfig.ReportCaller = false
+	} else if err != nil {
+		logger.Warn().Err(err).Msg("加载配置文件失败，将使用默认日志配置")
 	}
 
 	logger.Init(logConfig)

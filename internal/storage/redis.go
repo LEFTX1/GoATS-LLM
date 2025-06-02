@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"ai-agent-go/internal/config" // Import the main config package
+	"ai-agent-go/internal/config"    // Import the main config package
+	"ai-agent-go/internal/constants" // 新增：导入集中的常量包
 
 	"github.com/redis/go-redis/v9"
 )
@@ -91,7 +92,47 @@ func (r *Redis) GetMD5ExpireDuration() time.Duration {
 	return time.Duration(days) * 24 * time.Hour
 }
 
-// AddMD5WithExpiration 添加MD5到集合并设置过期时间
+// AddRawFileMD5 添加原始文件MD5到集合并设置过期时间
+func (r *Redis) AddRawFileMD5(ctx context.Context, md5Hex string) error {
+	return r.addMD5WithExpirationInternal(ctx, constants.RawFileMD5SetKey, md5Hex)
+}
+
+// AddParsedTextMD5 添加解析后的文本MD5到集合并设置过期时间
+func (r *Redis) AddParsedTextMD5(ctx context.Context, md5Hex string) error {
+	return r.addMD5WithExpirationInternal(ctx, constants.ParsedTextMD5SetKey, md5Hex)
+}
+
+// addMD5WithExpirationInternal 内部辅助函数，用于添加MD5到指定集合并设置过期时间
+func (r *Redis) addMD5WithExpirationInternal(ctx context.Context, setKey string, md5Hex string) error {
+	if r.Client == nil {
+		return fmt.Errorf("Redis client is not initialized")
+	}
+	pipe := r.Client.Pipeline()
+	pipe.SAdd(ctx, setKey, md5Hex)
+	pipe.ExpireNX(ctx, setKey, r.GetMD5ExpireDuration())
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// CheckRawFileMD5Exists 检查原始文件MD5是否存在于Redis Set中。
+func (r *Redis) CheckRawFileMD5Exists(ctx context.Context, md5Hex string) (bool, error) {
+	return r.checkMD5ExistsInternal(ctx, constants.RawFileMD5SetKey, md5Hex)
+}
+
+// CheckParsedTextMD5Exists 检查解析后的文本MD5是否存在于Redis Set中。
+func (r *Redis) CheckParsedTextMD5Exists(ctx context.Context, md5Hex string) (bool, error) {
+	return r.checkMD5ExistsInternal(ctx, constants.ParsedTextMD5SetKey, md5Hex)
+}
+
+// checkMD5ExistsInternal 内部辅助函数，用于检查MD5是否存在于指定集合
+func (r *Redis) checkMD5ExistsInternal(ctx context.Context, setKey string, md5Hex string) (bool, error) {
+	if r.Client == nil {
+		return false, fmt.Errorf("Redis client is not initialized")
+	}
+	return r.Client.SIsMember(ctx, setKey, md5Hex).Result()
+}
+
+// Deprecated: AddMD5WithExpiration 添加MD5到集合并设置过期时间. 请使用 AddRawFileMD5 或 AddParsedTextMD5 代替。
 func (r *Redis) AddMD5WithExpiration(ctx context.Context, key string, md5 string) error {
 	pipe := r.Client.Pipeline()
 
@@ -103,4 +144,12 @@ func (r *Redis) AddMD5WithExpiration(ctx context.Context, key string, md5 string
 
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+// Deprecated: CheckMD5Exists 检查给定的 MD5 是否存在于指定的 Redis Set 中。请使用 CheckRawFileMD5Exists 或 CheckParsedTextMD5Exists 代替。
+func (r *Redis) CheckMD5Exists(ctx context.Context, setKey string, md5Hex string) (bool, error) {
+	if r.Client == nil {
+		return false, fmt.Errorf("Redis client is not initialized")
+	}
+	return r.Client.SIsMember(ctx, setKey, md5Hex).Result()
 }

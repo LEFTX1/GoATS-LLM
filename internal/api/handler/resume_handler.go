@@ -2,15 +2,15 @@ package handler
 
 import (
 	"ai-agent-go/internal/config"
+	"ai-agent-go/internal/constants"
 	"ai-agent-go/internal/logger"
 	"ai-agent-go/internal/processor"
 	storage2 "ai-agent-go/internal/storage"
 	"ai-agent-go/internal/storage/models"
 	"ai-agent-go/internal/types"
+	"ai-agent-go/pkg/utils"
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,45 +21,7 @@ import (
 
 	// 导入共享类型
 	"github.com/gofrs/uuid/v5" // For redis.Nil
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
-)
-
-// StringPtr 返回字符串的指针
-func StringPtr(s string) *string {
-	if s == "" { // Ensure empty strings are not converted to nil pointers if that's not desired for DB
-		// Depending on DB schema, you might want to return nil for empty strings
-		// For now, returning pointer to empty string
-	}
-	return &s
-}
-
-// TimePtr returns a pointer to a time.Time object
-func TimePtr(t time.Time) *time.Time {
-	if t.IsZero() {
-		return nil
-	}
-	return &t
-}
-
-// IntPrt returns a pointer to an int
-func IntPtr(i int) *int {
-	return &i
-}
-
-// calculateMD5 computes the MD5 hash of a byte slice.
-func calculateMD5(data []byte) string {
-	hasher := md5.New()
-	hasher.Write(data)
-	return hex.EncodeToString(hasher.Sum(nil))
-}
-
-const (
-	jdCachePrefix       = "jd_text:"
-	jdCacheDuration     = 24 * time.Hour
-	defaultParserVer    = "1.0"               // Placeholder for actual Tika/LLM versions
-	rawFileMD5SetKey    = "resumes:file_md5s" // Redis Set key for storing raw file MD5s
-	parsedTextMD5SetKey = "resumes:text_md5s" // Redis Set key for storing parsed text MD5s
 )
 
 // ResumeHandler 简历处理器，负责协调简历的处理流程
@@ -97,10 +59,10 @@ func (h *ResumeHandler) HandleResumeUpload(ctx context.Context, reader io.Reader
 	if err != nil {
 		return nil, fmt.Errorf("读取上传文件内容失败: %w", err)
 	}
-	fileMD5Hex := calculateMD5(fileBytes) // 直接传递 []byte
+	fileMD5Hex := utils.CalculateMD5(fileBytes)
 
 	// 检查文件MD5是否已存在于Redis Set
-	exists, err := h.storage.Redis.Client.SIsMember(ctx, rawFileMD5SetKey, fileMD5Hex).Result()
+	exists, err := h.storage.Redis.CheckRawFileMD5Exists(ctx, fileMD5Hex)
 	if err != nil {
 		// 如果Redis查询失败，根据策略决定是继续还是报错。这里选择报错，因为去重是重要逻辑。
 		logger.Error().
@@ -142,7 +104,7 @@ func (h *ResumeHandler) HandleResumeUpload(ctx context.Context, reader io.Reader
 	}
 
 	// 在MinIO上传成功后，将新的文件MD5添加到Redis Set，并设置过期时间
-	if err := h.storage.Redis.AddMD5WithExpiration(ctx, rawFileMD5SetKey, fileMD5Hex); err != nil {
+	if err := h.storage.Redis.AddRawFileMD5(ctx, fileMD5Hex); err != nil {
 		// 如果添加到Redis Set失败，这是一个潜在的数据不一致问题。
 		// 根据策略，可以选择：
 		// 1. 强一致性：删除已上传的MinIO对象，然后返回错误。（较复杂）
@@ -229,8 +191,18 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 		}
 
 		// 单条消息处理
-		messages := []storage2.ResumeUploadMessage{message}
-		if err := h.batchInsertResumeSubmissionsGORM(ctx, messages); err != nil {
+		submissions := []models.ResumeSubmission{
+			{
+				SubmissionUUID:      message.SubmissionUUID,
+				OriginalFilePathOSS: message.OriginalFilePathOSS,
+				OriginalFilename:    message.OriginalFilename,
+				TargetJobID:         utils.StringPtr(message.TargetJobID),
+				SourceChannel:       message.SourceChannel,
+				SubmissionTimestamp: message.SubmissionTimestamp,
+				ProcessingStatus:    "PENDING_PARSING",
+			},
+		}
+		if err := h.storage.MySQL.BatchInsertResumeSubmissions(ctx, submissions); err != nil {
 			logger.Error().Err(err).Msg("插入简历提交记录失败")
 			return false
 		}
@@ -240,7 +212,9 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 				Err(err).
 				Str("submission_uuid", message.SubmissionUUID).
 				Msg("处理简历文本失败")
-			h.updateResumeStatusGORM(message.SubmissionUUID, "TEXT_EXTRACTION_FAILED")
+			if err := h.storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, "TEXT_EXTRACTION_FAILED"); err != nil {
+				logger.Error().Err(err).Str("submission_uuid", message.SubmissionUUID).Msg("更新简历状态为TEXT_EXTRACTION_FAILED失败")
+			}
 			return false
 		}
 
@@ -252,33 +226,6 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 	}
 
 	return nil
-}
-
-// batchInsertResumeSubmissionsGORM 批量插入简历提交记录 (使用GORM)
-func (h *ResumeHandler) batchInsertResumeSubmissionsGORM(ctx context.Context, messages []storage2.ResumeUploadMessage) error {
-	if len(messages) == 0 {
-		return nil
-	}
-
-	submissions := make([]models.ResumeSubmission, len(messages))
-	for i, msg := range messages {
-		submissions[i] = models.ResumeSubmission{
-			SubmissionUUID:      msg.SubmissionUUID,
-			OriginalFilePathOSS: msg.OriginalFilePathOSS,
-			OriginalFilename:    msg.OriginalFilename,
-			TargetJobID:         StringPtr(msg.TargetJobID),
-			SourceChannel:       msg.SourceChannel,
-			SubmissionTimestamp: msg.SubmissionTimestamp,
-			ProcessingStatus:    "PENDING_PARSING",
-		}
-	}
-
-	return h.storage.MySQL.DB().WithContext(ctx).Create(&submissions).Error
-}
-
-// updateResumeStatusGORM 更新简历状态 (使用GORM)
-func (h *ResumeHandler) updateResumeStatusGORM(submissionUUID string, status string) error {
-	return h.storage.MySQL.DB().Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", submissionUUID).Update("processing_status", status).Error
 }
 
 // processResumeText 处理简历文本提取
@@ -306,11 +253,11 @@ func (h *ResumeHandler) processResumeText(ctx context.Context, message storage2.
 	}
 
 	// 2.5. 计算提取文本的MD5并进行去重检查
-	textMD5Hex := calculateMD5([]byte(text)) // calculateMD5 expects []byte
+	textMD5Hex := utils.CalculateMD5([]byte(text))
 
 	// 将文本MD5存入 resume_submissions 表的 raw_text_md5 字段，无论是否重复
 	// 这样做可以方便后续分析，知道某个提交是哪个文本内容的副本
-	if err := h.updateResumeRawTextMD5GORM(message.SubmissionUUID, textMD5Hex); err != nil {
+	if err := h.storage.MySQL.UpdateResumeRawTextMD5(ctx, message.SubmissionUUID, textMD5Hex); err != nil {
 		// 即使这里失败，也尝试继续去重检查，但记录错误
 		logger.Warn().
 			Err(err).
@@ -319,7 +266,7 @@ func (h *ResumeHandler) processResumeText(ctx context.Context, message storage2.
 			Msg("更新 raw_text_md5 到数据库失败")
 	}
 
-	textExists, err := h.storage.Redis.Client.SIsMember(ctx, parsedTextMD5SetKey, textMD5Hex).Result()
+	textExists, err := h.storage.Redis.CheckParsedTextMD5Exists(ctx, textMD5Hex)
 	if err != nil {
 		logger.Warn().
 			Err(err).
@@ -333,7 +280,7 @@ func (h *ResumeHandler) processResumeText(ctx context.Context, message storage2.
 			Str("textMD5", textMD5Hex).
 			Str("submission", message.SubmissionUUID).
 			Msg("检测到重复的文本MD5，跳过后续LLM处理")
-		if err := h.updateResumeStatusGORM(message.SubmissionUUID, "CONTENT_DUPLICATE_SKIPPED"); err != nil {
+		if err := h.storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, "CONTENT_DUPLICATE_SKIPPED"); err != nil {
 			logger.Warn().
 				Err(err).
 				Str("submission", message.SubmissionUUID).
@@ -377,7 +324,7 @@ func (h *ResumeHandler) processResumeText(ctx context.Context, message storage2.
 	// 在消息成功发布到MQ后 (或至少在同一事务中保证)，将新的文本MD5添加到Redis Set
 	// 并且更新数据库中的 parsed_text_path_oss 和最终状态
 	if !textExists { // 只有当文本MD5是新的，并且我们真的处理了它，才添加到Set
-		if err := h.storage.Redis.AddMD5WithExpiration(ctx, parsedTextMD5SetKey, textMD5Hex); err != nil {
+		if err := h.storage.Redis.AddParsedTextMD5(ctx, textMD5Hex); err != nil {
 			logger.Warn().
 				Err(err).
 				Str("submission", message.SubmissionUUID).
@@ -393,15 +340,7 @@ func (h *ResumeHandler) processResumeText(ctx context.Context, message storage2.
 		"processing_status":    "QUEUED_FOR_LLM",
 		// raw_text_md5 已经在前面步骤中更新过了
 	}
-	return h.storage.MySQL.DB().Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Updates(updates).Error
-}
-
-// updateResumeRawTextMD5GORM 单独更新 resume_submissions 表的 raw_text_md5 字段
-func (h *ResumeHandler) updateResumeRawTextMD5GORM(submissionUUID string, rawTextMD5 string) error {
-	if rawTextMD5 == "" {
-		return nil // 如果MD5为空，则不更新
-	}
-	return h.storage.MySQL.DB().Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", submissionUUID).Update("raw_text_md5", rawTextMD5).Error
+	return h.storage.MySQL.UpdateResumeSubmissionFields(h.storage.MySQL.DB().WithContext(ctx), message.SubmissionUUID, updates)
 }
 
 // ParallelProcessResumeTask 处理简历分块和岗位匹配评估 (使用聚合类)
@@ -490,13 +429,17 @@ func (h *ResumeHandler) ParallelProcessResumeTask(ctx context.Context, message s
 	// 等待完成或错误
 	select {
 	case err := <-errChan:
-		h.updateResumeStatusGORM(message.SubmissionUUID, "LLM_PROCESSING_FAILED")
+		if errDb := h.storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, "LLM_PROCESSING_FAILED"); errDb != nil {
+			logger.Error().Err(errDb).Str("submission_uuid", message.SubmissionUUID).Msg("更新简历状态为LLM_PROCESSING_FAILED失败")
+		}
 		return err
 	case <-doneChan:
 		// 所有goroutine正常完成
 		break
 	case <-ctx.Done():
-		h.updateResumeStatusGORM(message.SubmissionUUID, "LLM_PROCESSING_FAILED")
+		if errDb := h.storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, "LLM_PROCESSING_FAILED"); errDb != nil {
+			logger.Error().Err(errDb).Str("submission_uuid", message.SubmissionUUID).Msg("更新简历状态为LLM_PROCESSING_FAILED失败")
+		}
 		return ctx.Err()
 	}
 
@@ -641,7 +584,7 @@ func (h *ResumeHandler) ParallelProcessResumeTask(ctx context.Context, message s
 	err = h.storage.MySQL.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. 写入分块结果 (如果有)
 		if sections != nil {
-			if err := h.saveResumeChunksGORM(tx, message.SubmissionUUID, sections); err != nil {
+			if err := h.storage.MySQL.SaveResumeChunks(tx, message.SubmissionUUID, sections); err != nil {
 				return fmt.Errorf("保存简历块失败: %w", err)
 			}
 		}
@@ -651,7 +594,7 @@ func (h *ResumeHandler) ParallelProcessResumeTask(ctx context.Context, message s
 		// 如果它更新的字段与下面的 Updates 冲突或覆盖，需要调整。
 		// 目前 saveResumeBasicInfoGORM 更新 llm_parsed_basic_info 和 llm_resume_identifier
 		if basicInfo != nil {
-			if err := h.saveResumeBasicInfoGORM(tx, message.SubmissionUUID, basicInfo); err != nil {
+			if err := h.storage.MySQL.SaveResumeBasicInfo(tx, message.SubmissionUUID, basicInfo); err != nil {
 				return fmt.Errorf("保存简历基本信息失败: %w", err)
 			}
 		}
@@ -662,14 +605,14 @@ func (h *ResumeHandler) ParallelProcessResumeTask(ctx context.Context, message s
 				SubmissionUUID:         message.SubmissionUUID,
 				JobID:                  message.TargetJobID,
 				LLMMatchScore:          &evaluation.MatchScore,
-				LLMMatchHighlightsJSON: convertArrayToJSON(evaluation.MatchHighlights),
-				LLMPotentialGapsJSON:   convertArrayToJSON(evaluation.PotentialGaps),
+				LLMMatchHighlightsJSON: utils.ConvertArrayToJSON(evaluation.MatchHighlights),
+				LLMPotentialGapsJSON:   utils.ConvertArrayToJSON(evaluation.PotentialGaps),
 				LLMResumeSummaryForJD:  evaluation.ResumeSummaryForJD,
 				EvaluationStatus:       "COMPLETED",
-				EvaluatedAt:            timePtr(time.Unix(evaluation.EvaluatedAt, 0)),
+				EvaluatedAt:            utils.TimePtr(time.Unix(evaluation.EvaluatedAt, 0)),
 			}
 
-			if err := tx.Create(&match).Error; err != nil {
+			if err := h.storage.MySQL.CreateJobSubmissionMatch(tx, &match); err != nil {
 				return fmt.Errorf("保存岗位匹配评估结果失败: %w", err)
 			}
 		}
@@ -687,9 +630,7 @@ func (h *ResumeHandler) ParallelProcessResumeTask(ctx context.Context, message s
 			// candidate_id 等其他字段的更新需要在此处或 saveResumeBasicInfoGORM 中处理
 		}
 
-		if err := tx.Model(&models.ResumeSubmission{}).
-			Where("submission_uuid = ?", message.SubmissionUUID).
-			Updates(updateData).Error; err != nil {
+		if err := h.storage.MySQL.UpdateResumeSubmissionFields(tx, message.SubmissionUUID, updateData); err != nil {
 			// 如果 saveResumeBasicInfoGORM 已经更新了部分字段，这里的 Updates 可能会覆盖或冲突
 			// 需要确保更新逻辑的正确性。
 			// 例如，如果 basicInfo 更新也包含了 status，那么这里的 status 更新需要协调。
@@ -702,36 +643,19 @@ func (h *ResumeHandler) ParallelProcessResumeTask(ctx context.Context, message s
 	})
 
 	if err != nil {
-		h.updateResumeStatusGORM(message.SubmissionUUID, "LLM_PROCESSING_FAILED")
+		if errDb := h.storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, "LLM_PROCESSING_FAILED"); errDb != nil {
+			logger.Error().Err(errDb).Str("submission_uuid", message.SubmissionUUID).Msg("更新简历状态为LLM_PROCESSING_FAILED失败")
+		}
 		return fmt.Errorf("事务执行失败: %w", err)
 	}
 
 	return nil
 }
 
-// 辅助函数: 将字符串数组转换为JSON
-func convertArrayToJSON(arr []string) datatypes.JSON {
-	if arr == nil || len(arr) == 0 {
-		return datatypes.JSON("[]")
-	}
-
-	jsonBytes, err := json.Marshal(arr)
-	if err != nil {
-		return datatypes.JSON("[]")
-	}
-
-	return datatypes.JSON(jsonBytes)
-}
-
-// 辅助函数: 返回时间指针
-func timePtr(t time.Time) *time.Time {
-	return &t
-}
-
 // StartLLMParsingConsumer 启动LLM解析消费者
 func (h *ResumeHandler) StartLLMParsingConsumer(ctx context.Context, prefetchCount int) error {
 	// 1. 确保交换机和队列存在
-	if err := h.storage.RabbitMQ.EnsureExchange(h.cfg.RabbitMQ.ResumeEventsExchange, "direct", true); err != nil {
+	if err := h.storage.RabbitMQ.EnsureExchange(h.cfg.RabbitMQ.ProcessingEventsExchange, "direct", true); err != nil {
 		return fmt.Errorf("确保交换机存在失败: %w", err)
 	}
 
@@ -741,7 +665,7 @@ func (h *ResumeHandler) StartLLMParsingConsumer(ctx context.Context, prefetchCou
 
 	if err := h.storage.RabbitMQ.BindQueue(
 		h.cfg.RabbitMQ.LLMParsingQueue,
-		h.cfg.RabbitMQ.ResumeEventsExchange,
+		h.cfg.RabbitMQ.ProcessingEventsExchange,
 		h.cfg.RabbitMQ.ParsedRoutingKey,
 	); err != nil {
 		return fmt.Errorf("绑定队列失败: %w", err)
@@ -781,51 +705,6 @@ func (h *ResumeHandler) StartLLMParsingConsumer(ctx context.Context, prefetchCou
 	return nil
 }
 
-// saveResumeChunksGORM 保存简历块到数据库 (使用GORM)
-func (h *ResumeHandler) saveResumeChunksGORM(tx *gorm.DB, submissionUUID string, sections []*types.ResumeSection) error {
-	if len(sections) == 0 {
-		return nil
-	}
-
-	chunks := make([]models.ResumeSubmissionChunk, len(sections))
-	for i, section := range sections {
-		chunks[i] = models.ResumeSubmissionChunk{
-			SubmissionUUID:      submissionUUID,
-			ChunkIDInSubmission: i + 1,                // 从1开始的chunk_id, 对应 types.ResumeSection 中的原始 ChunkID 或其索引
-			ChunkType:           string(section.Type), // 类型转换
-			ChunkTitle:          section.Title,
-			ChunkContentText:    section.Content,
-		}
-	}
-	return tx.Create(&chunks).Error
-}
-
-// saveResumeBasicInfoGORM 保存简历基本信息到数据库 (使用GORM)
-func (h *ResumeHandler) saveResumeBasicInfoGORM(tx *gorm.DB, submissionUUID string, metadata map[string]string) error {
-	// 将metadata转换为JSON
-	basicInfoJSON, err := models.StringMapToJSON(metadata) // 使用 models 中的辅助函数
-	if err != nil {
-		return fmt.Errorf("转换metadata为JSON失败: %w", err)
-	}
-
-	// 从metadata中提取标识符（姓名_电话号码）
-	var identifier string
-	if name, hasName := metadata["name"]; hasName {
-		if phone, hasPhone := metadata["phone"]; hasPhone {
-			identifier = fmt.Sprintf("%s_%s", name, phone)
-		} else {
-			identifier = fmt.Sprintf("%s_", name)
-		}
-	}
-
-	updates := map[string]interface{}{
-		"llm_parsed_basic_info": basicInfoJSON,
-		"llm_resume_identifier": identifier,
-	}
-
-	return tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", submissionUUID).Updates(updates).Error
-}
-
 // StartMD5CleanupTask 启动MD5记录清理任务
 // 此方法可选调用，用于定期检查和重置MD5记录的过期时间
 func (h *ResumeHandler) StartMD5CleanupTask(ctx context.Context) {
@@ -858,41 +737,29 @@ func (h *ResumeHandler) StartMD5CleanupTask(ctx context.Context) {
 func (h *ResumeHandler) cleanupMD5Records(ctx context.Context) {
 	logger.Info().Msg("执行MD5记录清理任务...")
 
-	// 设置文件MD5集合的过期时间
-	ttl, err := h.storage.Redis.Client.TTL(ctx, rawFileMD5SetKey).Result()
-	if err != nil {
-		logger.Error().
-			Err(err).
-			Msg("获取文件MD5集合过期时间失败")
-	} else if ttl < 0 { // -1表示无过期时间，-2表示key不存在
+	// 使用新的内部常量来检查和设置文件MD5集合的过期时间
+	ttlFile, errFile := h.storage.Redis.Client.TTL(ctx, constants.RawFileMD5SetKey).Result()
+	if errFile != nil {
+		logger.Error().Err(errFile).Str("setKey", constants.RawFileMD5SetKey).Msg("获取文件MD5集合过期时间失败")
+	} else if ttlFile < 0 {
 		expiry := h.storage.Redis.GetMD5ExpireDuration()
-		if err := h.storage.Redis.Client.Expire(ctx, rawFileMD5SetKey, expiry).Err(); err != nil {
-			logger.Error().
-				Err(err).
-				Msg("设置文件MD5集合过期时间失败")
+		if err := h.storage.Redis.Client.Expire(ctx, constants.RawFileMD5SetKey, expiry).Err(); err != nil {
+			logger.Error().Err(err).Str("setKey", constants.RawFileMD5SetKey).Msg("设置文件MD5集合过期时间失败")
 		} else {
-			logger.Info().
-				Dur("expiry", expiry).
-				Msg("成功设置文件MD5集合过期时间")
+			logger.Info().Str("setKey", constants.RawFileMD5SetKey).Dur("expiry", expiry).Msg("成功设置文件MD5集合过期时间")
 		}
 	}
 
-	// 设置文本MD5集合的过期时间
-	ttl, err = h.storage.Redis.Client.TTL(ctx, parsedTextMD5SetKey).Result()
-	if err != nil {
-		logger.Error().
-			Err(err).
-			Msg("获取文本MD5集合过期时间失败")
-	} else if ttl < 0 { // -1表示无过期时间，-2表示key不存在
+	// 使用新的内部常量来检查和设置文本MD5集合的过期时间
+	ttlText, errText := h.storage.Redis.Client.TTL(ctx, constants.ParsedTextMD5SetKey).Result()
+	if errText != nil {
+		logger.Error().Err(errText).Str("setKey", constants.ParsedTextMD5SetKey).Msg("获取文本MD5集合过期时间失败")
+	} else if ttlText < 0 {
 		expiry := h.storage.Redis.GetMD5ExpireDuration()
-		if err := h.storage.Redis.Client.Expire(ctx, parsedTextMD5SetKey, expiry).Err(); err != nil {
-			logger.Error().
-				Err(err).
-				Msg("设置文本MD5集合过期时间失败")
+		if err := h.storage.Redis.Client.Expire(ctx, constants.ParsedTextMD5SetKey, expiry).Err(); err != nil {
+			logger.Error().Err(err).Str("setKey", constants.ParsedTextMD5SetKey).Msg("设置文本MD5集合过期时间失败")
 		} else {
-			logger.Info().
-				Dur("expiry", expiry).
-				Msg("成功设置文本MD5集合过期时间")
+			logger.Info().Str("setKey", constants.ParsedTextMD5SetKey).Dur("expiry", expiry).Msg("成功设置文本MD5集合过期时间")
 		}
 	}
 

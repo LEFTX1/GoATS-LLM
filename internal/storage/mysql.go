@@ -3,6 +3,8 @@ package storage
 import (
 	"ai-agent-go/internal/config"
 	"ai-agent-go/internal/storage/models"
+	"ai-agent-go/internal/types"
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -161,4 +163,79 @@ func (m *MySQL) Save(value interface{}) error {
 // 泛型删除方法
 func (m *MySQL) Delete(value interface{}, query interface{}, args ...interface{}) error {
 	return m.db.Where(query, args...).Delete(value).Error
+}
+
+// BatchInsertResumeSubmissions 批量插入简历提交记录
+func (m *MySQL) BatchInsertResumeSubmissions(ctx context.Context, submissions []models.ResumeSubmission) error {
+	if len(submissions) == 0 {
+		return nil
+	}
+	return m.db.WithContext(ctx).Create(&submissions).Error
+}
+
+// UpdateResumeProcessingStatus 更新简历处理状态
+func (m *MySQL) UpdateResumeProcessingStatus(ctx context.Context, submissionUUID string, status string) error {
+	return m.db.WithContext(ctx).Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", submissionUUID).Update("processing_status", status).Error
+}
+
+// UpdateResumeRawTextMD5 更新简历的原始文本MD5
+func (m *MySQL) UpdateResumeRawTextMD5(ctx context.Context, submissionUUID string, rawTextMD5 string) error {
+	if rawTextMD5 == "" {
+		return nil // 如果MD5为空，则不更新
+	}
+	return m.db.WithContext(ctx).Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", submissionUUID).Update("raw_text_md5", rawTextMD5).Error
+}
+
+// SaveResumeChunks 保存简历分块信息 (在事务中执行)
+func (m *MySQL) SaveResumeChunks(tx *gorm.DB, submissionUUID string, sections []*types.ResumeSection) error {
+	if len(sections) == 0 {
+		return nil
+	}
+	chunks := make([]models.ResumeSubmissionChunk, len(sections))
+	for i, section := range sections {
+		chunks[i] = models.ResumeSubmissionChunk{
+			SubmissionUUID:      submissionUUID,
+			ChunkIDInSubmission: i + 1, // 从1开始的chunk_id
+			ChunkType:           string(section.Type),
+			ChunkTitle:          section.Title,
+			ChunkContentText:    section.Content,
+		}
+	}
+	return tx.Create(&chunks).Error
+}
+
+// SaveResumeBasicInfo 保存简历基本信息 (在事务中执行)
+func (m *MySQL) SaveResumeBasicInfo(tx *gorm.DB, submissionUUID string, metadata map[string]string) error {
+	basicInfoJSON, err := models.StringMapToJSON(metadata)
+	if err != nil {
+		return fmt.Errorf("转换metadata为JSON失败: %w", err)
+	}
+
+	var identifier string
+	if name, hasName := metadata["name"]; hasName {
+		if phone, hasPhone := metadata["phone"]; hasPhone {
+			identifier = fmt.Sprintf("%s_%s", name, phone)
+		} else {
+			identifier = fmt.Sprintf("%s_", name)
+		}
+	}
+
+	updates := map[string]interface{}{
+		"llm_parsed_basic_info": basicInfoJSON,
+		"llm_resume_identifier": identifier,
+	}
+	return tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", submissionUUID).Updates(updates).Error
+}
+
+// UpdateResumeSubmissionFields 更新 ResumeSubmission 表的多个字段 (在事务中执行)
+func (m *MySQL) UpdateResumeSubmissionFields(tx *gorm.DB, submissionUUID string, updates map[string]interface{}) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	return tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", submissionUUID).Updates(updates).Error
+}
+
+// CreateJobSubmissionMatch 创建 JobSubmissionMatch 记录 (在事务中执行)
+func (m *MySQL) CreateJobSubmissionMatch(tx *gorm.DB, match *models.JobSubmissionMatch) error {
+	return tx.Create(match).Error
 }
