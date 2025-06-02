@@ -8,6 +8,7 @@ import (
 	parser2 "ai-agent-go/internal/parser"
 	"ai-agent-go/internal/processor"
 	"ai-agent-go/internal/storage"
+	"ai-agent-go/pkg/ratelimit"
 	"context"
 	"fmt"
 	"os"
@@ -210,22 +211,96 @@ func initializeHandler(cfg *config.Config, storageManager *storage.Storage) (*ha
 
 	// 如果配置了Aliyun API密钥，设置LLM相关组件
 	if cfg.Aliyun.APIKey != "" {
-		// 创建LLM模型
-		aliyunChatModel, err := agent.NewAliyunQwenChatModel(
+		// 为分块器创建原始LLM模型
+		chunkerModelName := cfg.LLMParser.ModelName
+		if chunkerModelName == "" {
+			chunkerModelName = cfg.Aliyun.Model
+		}
+
+		// 处理分块器专用参数
+		chunkerQPM := cfg.LLMParser.QPM
+		chunkerMaxRetries := cfg.LLMParser.MaxRetries
+		chunkerRetryWait := time.Duration(cfg.LLMParser.RetryWaitSeconds) * time.Second
+
+		// 创建原始LLM模型（分块器）
+		baseChunkerModel, err := agent.NewAliyunQwenChatModel(
 			cfg.Aliyun.APIKey,
-			cfg.Aliyun.Model,
+			chunkerModelName,
 			cfg.Aliyun.APIURL,
 		)
 		if err != nil {
-			logger.Warn().Err(err).Msg("初始化LLM模型失败")
+			logger.Warn().Err(err).Msg("创建分块器LLM模型失败")
 		} else {
-			// 创建LLM分块器并设置到处理器中
-			llmChunker := parser2.NewLLMResumeChunker(aliyunChatModel)
-			// 创建LLM评估器并设置到处理器中
-			llmEvaluator := parser2.NewLLMJobEvaluator(aliyunChatModel)
+			// 直接在源文件中使用构造函数方式创建带限流的LLM模型
+			limitedChunkerModel := ratelimit.NewLLMWithRateLimit(
+				baseChunkerModel,
+				chunkerModelName,
+				cfg.ModelQPMLimits,
+				chunkerQPM,
+				chunkerMaxRetries,
+				chunkerRetryWait,
+			)
 
-			// 应用到组件集合
+			// 记录日志
+			logger.Info().
+				Str("model", chunkerModelName).
+				Int("qpm", chunkerQPM).
+				Int("maxRetries", chunkerMaxRetries).
+				Dur("retryWait", chunkerRetryWait).
+				Msg("创建带限流的LLM分块器模型")
+
+			// 创建LLM分块器并设置到处理器中
+			llmChunker := parser2.NewLLMResumeChunker(limitedChunkerModel)
 			processor.WithResumeChunker(llmChunker)(processorComponents)
+		}
+
+		// 为评估器创建原始LLM模型
+		evaluatorModelName := cfg.JobEvaluator.ModelName
+		if evaluatorModelName == "" {
+			evaluatorModelName = cfg.Aliyun.Model
+		}
+
+		// 检查任务专用模型配置
+		if cfg.Aliyun.TaskModels != nil {
+			if jobEvalModel, ok := cfg.Aliyun.TaskModels["job_evaluate"]; ok && jobEvalModel != "" {
+				evaluatorModelName = jobEvalModel
+			}
+		}
+
+		// 处理评估器专用参数
+		evaluatorQPM := cfg.JobEvaluator.QPM
+		evaluatorMaxRetries := cfg.JobEvaluator.MaxRetries
+		evaluatorRetryWait := time.Duration(cfg.JobEvaluator.RetryWaitSeconds) * time.Second
+
+		// 创建原始LLM模型（评估器）
+		baseEvaluatorModel, err := agent.NewAliyunQwenChatModel(
+			cfg.Aliyun.APIKey,
+			evaluatorModelName,
+			cfg.Aliyun.APIURL,
+		)
+		if err != nil {
+			logger.Warn().Err(err).Msg("创建评估器LLM模型失败")
+		} else {
+			// 直接在源文件中使用构造函数方式创建带限流的LLM模型
+			limitedEvaluatorModel := ratelimit.NewLLMWithRateLimit(
+				baseEvaluatorModel,
+				evaluatorModelName,
+				cfg.ModelQPMLimits,
+				evaluatorQPM,
+				evaluatorMaxRetries,
+				evaluatorRetryWait,
+			)
+
+			// 记录日志
+			logger.Info().
+				Str("model", evaluatorModelName).
+				Int("qpm", evaluatorQPM).
+				Int("maxRetries", evaluatorMaxRetries).
+				Dur("retryWait", evaluatorRetryWait).
+				Msg("创建带限流的LLM评估器模型")
+
+			// 创建LLM评估器并设置到处理器中
+			llmEvaluator := parser2.NewLLMJobEvaluator(limitedEvaluatorModel)
 			processor.WithJobMatchEvaluator(llmEvaluator)(processorComponents)
 		}
 	}

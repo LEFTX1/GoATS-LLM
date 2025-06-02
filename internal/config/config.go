@@ -77,6 +77,9 @@ type Config struct {
 	// 新增日志配置
 	Logger LoggerConfig `yaml:"logger"`
 
+	// 新增模型QPM限制配置
+	ModelQPMLimits map[string]int `yaml:"model_qpm_limits"`
+
 	// 新增用于记录当前处理流程主要解析器版本的字段
 	ActiveParserVersion string `yaml:"active_parser_version"`
 }
@@ -169,15 +172,21 @@ type LLMParserConfig struct {
 	MaxTokens         int     `yaml:"maxTokens"`
 	PromptTemplate    string  `yaml:"promptTemplate"`    // 简历分块的提示模板
 	ExtractionTimeout string  `yaml:"extractionTimeout"` // 解析超时，例如 "30s"
+	QPM               int     `yaml:"qpm"`               // 每分钟请求数限制
+	MaxRetries        int     `yaml:"maxRetries"`        // 最大重试次数
+	RetryWaitSeconds  int     `yaml:"retryWaitSeconds"`  // 重试等待时间(秒)
 }
 
 // JobEvaluatorConfig 定义JD评估器的配置
 type JobEvaluatorConfig struct {
-	ModelName      string  `yaml:"modelName"`
-	Temperature    float64 `yaml:"temperature"`
-	MaxTokens      int     `yaml:"maxTokens"`
-	PromptTemplate string  `yaml:"promptTemplate"` // JD匹配的提示模板
-	EvalTimeout    string  `yaml:"evalTimeout"`    // 评估超时
+	ModelName        string  `yaml:"modelName"`
+	Temperature      float64 `yaml:"temperature"`
+	MaxTokens        int     `yaml:"maxTokens"`
+	PromptTemplate   string  `yaml:"promptTemplate"`   // JD匹配的提示模板
+	EvalTimeout      string  `yaml:"evalTimeout"`      // 评估超时
+	QPM              int     `yaml:"qpm"`              // 每分钟请求数限制
+	MaxRetries       int     `yaml:"maxRetries"`       // 最大重试次数
+	RetryWaitSeconds int     `yaml:"retryWaitSeconds"` // 重试等待时间(秒)
 }
 
 // QdrantConfig 是Qdrant配置的别名，与现有Qdrant字段兼容
@@ -473,6 +482,16 @@ func createDefaultConfig() *Config {
 	config.Logger.Format = "pretty" // 开发环境默认使用美化输出
 	config.Logger.TimeFormat = "2006-01-02 15:04:05"
 	config.Logger.ReportCaller = true
+
+	// 添加默认的模型QPM限制
+	config.ModelQPMLimits = map[string]int{
+		"qwen-max":          1200,
+		"qwen-max-latest":   1200,
+		"qwen-plus":         15000,
+		"qwen-plus-latest":  15000,
+		"qwen-turbo":        1200,
+		"qwen-turbo-latest": 1200,
+	}
 
 	return config
 }
