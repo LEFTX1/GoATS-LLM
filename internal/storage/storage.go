@@ -4,7 +4,9 @@ import (
 	"ai-agent-go/internal/config"
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"strings"
 )
 
@@ -44,14 +46,21 @@ func NewStorage(ctx context.Context, cfg *config.Config) (*Storage, error) {
 	var err error
 	var initErrors []string
 
-	// 初始化MinIO（如果配置了）
-	if cfg.MinIO.Endpoint != "" {
-		log.Printf("初始化MinIO...")
-		storage.MinIO, err = NewMinIO(&cfg.MinIO)
-		if err != nil {
-			log.Printf("警告: 初始化MinIO失败: %v", err)
-			initErrors = append(initErrors, fmt.Sprintf("MinIO: %v", err))
-		}
+	// 根据配置决定 MinIO 的 logger
+	var minioLogger *log.Logger
+	if cfg.Logger.Level == "debug" || (cfg.MinIO.EnableTestLogging) {
+		minioLogger = log.New(os.Stderr, "[MinIOStorage] ", log.LstdFlags|log.Lshortfile)
+	} else {
+		minioLogger = log.New(io.Discard, "", 0)
+	}
+
+	// 初始化MinIO
+	storage.MinIO, err = NewMinIO(&cfg.MinIO, minioLogger)
+	if err != nil {
+		log.Printf("警告: 初始化MinIO失败: %v", err)
+		initErrors = append(initErrors, fmt.Sprintf("MinIO: %v", err))
+	} else {
+		log.Println("MinIO客户端初始化成功")
 	}
 
 	// 初始化RabbitMQ（如果配置了）

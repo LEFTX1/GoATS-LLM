@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,6 +34,8 @@ type LLMResumeChunker struct {
 
 	// 是否详细解析基本信息
 	detailedBasicInfo bool
+
+	logger *log.Logger
 }
 
 // LLMResumeStructure LLM提取的简历结构
@@ -65,9 +69,14 @@ type LLMResumeStructure struct {
 }
 
 // NewLLMResumeChunker 创建新的LLM简历分块器
-func NewLLMResumeChunker(llmModel model.ToolCallingChatModel, options ...LLMChunkerOption) *LLMResumeChunker {
+func NewLLMResumeChunker(llmModel model.ToolCallingChatModel, logger *log.Logger, options ...LLMChunkerOption) *LLMResumeChunker {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+
 	chunker := &LLMResumeChunker{
 		llmModel: llmModel,
+		logger:   logger,
 		// 默认提取的基本信息字段
 		extractFields: []string{
 			"name", "email", "phone", "github", "location", "education_level", "position", "years_of_experience", "job_intention",
@@ -87,9 +96,15 @@ func NewLLMResumeChunker(llmModel model.ToolCallingChatModel, options ...LLMChun
 		opt(chunker)
 	}
 
-	// 生成提示词模板和少样本示例
-	chunker.generatePromptTemplate()
-	chunker.generateFewShotExamples()
+	// 首先生成或确认 fewShotExamples，因为 promptTemplate 可能会用到它
+	if chunker.fewShotExamples == "" {
+		chunker.generateFewShotExamples()
+	}
+
+	// 然后生成或确认 promptTemplate
+	if chunker.promptTemplate == "" {
+		chunker.generatePromptTemplate()
+	}
 
 	return chunker
 }
@@ -127,15 +142,10 @@ func WithCustomFewShotExamples(examples string) LLMChunkerOption {
 
 // 生成提示词模板
 func (c *LLMResumeChunker) generatePromptTemplate() {
-	// 构建提取字段列表
-	// fieldsList := strings.Join(c.extractFields, "、") // 将在ChunkResume中处理
-	// 构建章节类型列表
-	// sectionsList := strings.Join(c.sectionTypes, "、") // 将在ChunkResume中处理
-
 	// 创建提示词模板
-	// 注意：确保模板中有三个 %s 占位符，分别对应 fieldsList, sectionsList, 和 resumeText
-	// 这三个占位符将在 ChunkResume 方法中被实际填充。
-	c.promptTemplate = `你是一个专业的简历解析专家，专注于从【可能已包含基本换行和分段结构】的简历文本中提取结构化信息，并按要求分割内容。
+	// 注意：确保模板中有两个 %s 占位符，分别对应 fieldsList, sectionsList
+	// 简历文本将通过 user message 传递
+	baseTemplate := `你是一个专业的简历解析专家，专注于从【可能已包含基本换行和分段结构】的简历文本中提取结构化信息，并按要求分割内容。
 
 核心任务：
 1. 提取基本信息：准确识别并提取候选人的核心个人信息，通常位于简历开头，将其作为一个独立的 "BASIC_INFO" 类型的chunk。
@@ -159,29 +169,27 @@ func (c *LLMResumeChunker) generatePromptTemplate() {
 
 JSON输出格式规范：
 {
-  "basic_info": { // 对应第一个 "BASIC_INFO" 类型的chunk的内容提取
+  "basic_info": { 
     "name": "string",
     "phone": "string",
     "email": "string",
-    "position": "string" // 示例
-    // ... (LLM应根据"基本信息字段提取指示"动态填充此处未列出的其他字段)
+    "position": "string" 
   },
-  "chunks": [ // 第一个chunk通常是BASIC_INFO类型，后续为其他类型
+  "chunks": [
     {
       "chunk_id": 1,
       "resume_identifier": "string",
-      "type": "BASIC_INFO", // 第一个块通常是这个
-      "title": "string", // BASIC_INFO通常无标题，可为空
-      "content": "string" // 包含姓名、联系方式等头部信息的完整文本
+      "type": "BASIC_INFO",
+      "title": "string",
+      "content": "string"
     },
     {
-      "chunk_id": 2, // 后续chunk
+      "chunk_id": 2,
       "resume_identifier": "string",
-      "type": "string", // (LLM应从"内容分块类型识别指示"中选择，如EDUCATION, SKILLS等)
+      "type": "string",
       "title": "string",
       "content": "string"
     }
-    // ... 更多 chunks
   ],
   "metadata": {
     "is_211": "boolean",
@@ -195,16 +203,14 @@ JSON输出格式规范：
   }
 }
 
-待分析的简历文本如下：
-"""
-%s
-"""
+请严格按照上述JSON格式规范输出，不要包含任何解释性文字或Markdown标记。确保JSON的完整性和可解析性。
+接下来，你将收到一份简历文本，请对其进行分析。`
 
-请严格按照上述JSON格式规范输出，不要包含任何解释性文字或Markdown标记。确保JSON的完整性和可解析性。`
-
-	// 填充模板 (移除此处的 Sprintf 调用)
-	// c.promptTemplate = fmt.Sprintf(template, fieldsList, sectionsList) // 只填充前两个%s，第三个%s是为ChunkResume中的resumeText预留的
-
+	if c.fewShotExamples != "" {
+		c.promptTemplate = fmt.Sprintf("%s\n\n%s", c.fewShotExamples, baseTemplate)
+	} else {
+		c.promptTemplate = baseTemplate
+	}
 }
 
 // parser/chunker_llm.go
@@ -332,8 +338,8 @@ AI创新公司 算法实习生 2025.01 - 2025.03
   ],
   "metadata": { 
     "is_211": false, "is_985": false, "is_double_top": false, 
-    "has_intern": true, // 因为有实习经历字段
-    "highest_education": "", // 示例中未提供学历信息
+    "has_intern": true, 
+    "highest_education": "", 
     "years_of_experience": 8, 
     "resume_score": 88,
     "tags": ["经验丰富", "管理经验", "技术管理"]
@@ -349,16 +355,14 @@ func (c *LLMResumeChunker) ChunkResume(ctx context.Context, text string) ([]*typ
 	// 构建章节类型列表
 	sectionsList := strings.Join(c.sectionTypes, "、")
 
-	// 填充简历文本到提示词
-	prompt := fmt.Sprintf(c.promptTemplate, fieldsList, sectionsList, text) // 一次性填充所有占位符
+	// System prompt 现在是 c.promptTemplate 格式化后的结果，它已经包含了 few-shot 示例和任务描述
+	systemPromptContent := fmt.Sprintf(c.promptTemplate, fieldsList, sectionsList)
 
-	// 添加少样本学习示例（如果有）
-	if c.fewShotExamples != "" {
-		prompt = fmt.Sprintf("%s\n\n%s", c.fewShotExamples, prompt)
-	}
+	// User prompt 就是实际的简历文本
+	userPromptContent := text
 
 	// 调用LLM
-	response, err := c.callLLM(ctx, prompt)
+	response, err := c.callLLM(ctx, systemPromptContent, userPromptContent)
 	if err != nil {
 		return nil, nil, fmt.Errorf("LLM调用失败: %w", err)
 	}
@@ -446,11 +450,11 @@ func (c *LLMResumeChunker) ChunkResume(ctx context.Context, text string) ([]*typ
 }
 
 // callLLM 调用LLM处理提示词
-func (c *LLMResumeChunker) callLLM(ctx context.Context, prompt string) (string, error) {
+func (c *LLMResumeChunker) callLLM(ctx context.Context, systemContent string, userContent string) (string, error) {
 	// 创建消息列表，包含系统提示和用户提示
 	messages := []*einoschema.Message{
-		{Role: "system", Content: c.fewShotExamples}, // 将少样本示例作为系统消息
-		{Role: "user", Content: prompt},              // 用户提示
+		{Role: "system", Content: systemContent}, // 合并后的系统提示
+		{Role: "user", Content: userContent},     // 实际的简历文本
 	}
 
 	// 设置最大重试次数
@@ -459,6 +463,9 @@ func (c *LLMResumeChunker) callLLM(ctx context.Context, prompt string) (string, 
 
 	var response *einoschema.Message
 	var err error
+
+	c.logger.Printf("[LLMResumeChunker] System Prompt: %s", systemContent)
+	c.logger.Printf("[LLMResumeChunker] User Prompt (first 500 chars): %.500s", userContent)
 
 	// 重试逻辑
 	for retry := 0; retry <= maxRetries; retry++ {
@@ -470,12 +477,12 @@ func (c *LLMResumeChunker) callLLM(ctx context.Context, prompt string) (string, 
 			case <-time.After(retryDelay):
 				// 增加退避时间
 				retryDelay *= 2
-				log.Printf("重试LLM调用 (第%d次)", retry)
+				c.logger.Printf("重试LLM调用 (第%d次)", retry)
 			}
 		}
 
-		// 创建子上下文，防止原始上下文已过期但仍能完成调用
-		callCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		// 创建带超时的上下文，继承上游的取消信号
+		callCtx, cancel := context.WithTimeout(ctx, 60*time.Second) // 继承上游的ctx
 
 		// 调用LLM
 		response, err = c.llmModel.Generate(callCtx, messages)
@@ -487,10 +494,12 @@ func (c *LLMResumeChunker) callLLM(ctx context.Context, prompt string) (string, 
 
 		// 判断是否应该重试
 		if !isRetryableError(err) || retry >= maxRetries {
+			c.logger.Printf("[LLMResumeChunker] LLM call final error after retries: %v", err)
 			return "", fmt.Errorf("LLM Generate failed: %w", err)
 		}
 	}
 
+	c.logger.Printf("[LLMResumeChunker] LLM Response: %s", response.Content)
 	// 返回响应内容
 	return response.Content, nil
 }
@@ -516,6 +525,8 @@ func (c *LLMResumeChunker) parseResponse(response string) (*LLMResumeStructure, 
 	// 提取JSON部分（防止LLM返回的不是纯JSON）
 	jsonStr := extractJSON(response)
 	if jsonStr == "" {
+		// 记录原始响应以供调试
+		c.logger.Printf("无法从LLM响应中提取有效的JSON。原始响应: %s", response)
 		return nil, fmt.Errorf("无法从LLM响应中提取有效的JSON")
 	}
 
@@ -530,7 +541,14 @@ func (c *LLMResumeChunker) parseResponse(response string) (*LLMResumeStructure, 
 
 // 从文本中提取JSON
 func extractJSON(text string) string {
-	// 尝试寻找 JSON 的开始和结束位置
+	// 尝试使用正则表达式提取 ```json ... ``` 代码块中的内容
+	re := regexp.MustCompile("(?s)```json\\s*(\\{.*?\\})\\s*```")
+	matches := re.FindStringSubmatch(text)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
+
+	// 如果正则没有匹配到，尝试寻找 JSON 的开始和结束位置作为回退
 	start := strings.Index(text, "{")
 	if start == -1 {
 		return ""
@@ -544,10 +562,9 @@ func extractJSON(text string) string {
 		} else if text[i] == '}' {
 			level--
 			if level == 0 {
-				return text[start : i+1]
+				return strings.TrimSpace(text[start : i+1])
 			}
 		}
 	}
-
 	return ""
 }

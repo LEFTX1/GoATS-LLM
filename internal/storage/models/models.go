@@ -44,6 +44,20 @@ func (Job) TableName() string {
 	return "jobs"
 }
 
+// JobVector 存储岗位的向量表示
+type JobVector struct {
+	JobID                 string    `gorm:"type:char(36);primaryKey"`
+	VectorRepresentation  []byte    `gorm:"type:mediumblob;not null"` // 存储序列化后的向量
+	EmbeddingModelVersion string    `gorm:"type:varchar(100);not null"`
+	CreatedAt             time.Time `gorm:"type:datetime(6);default:CURRENT_TIMESTAMP(6)"`
+	UpdatedAt             time.Time `gorm:"type:datetime(6);default:CURRENT_TIMESTAMP(6);autoUpdateTime"`
+	Job                   Job       `gorm:"foreignKey:JobID;references:JobID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+}
+
+func (JobVector) TableName() string {
+	return "job_vectors"
+}
+
 // ResumeSubmission 简历提交/快照表
 type ResumeSubmission struct {
 	SubmissionUUID      string         `gorm:"type:char(36);primaryKey"`
@@ -55,6 +69,7 @@ type ResumeSubmission struct {
 	OriginalFilePathOSS string         `gorm:"type:varchar(1024)"`
 	ParsedTextPathOSS   string         `gorm:"type:varchar(1024)"`
 	RawTextMD5          string         `gorm:"type:char(32);index:idx_rs_raw_text_md5"`
+	SimilarityHash      *string        `gorm:"type:char(16);uniqueIndex:idx_rs_similarity_hash"` // 新增字段，注意设为指针以允许NULL
 	LLMParsedBasicInfo  datatypes.JSON `gorm:"type:json"`
 	LLMResumeIdentifier string         `gorm:"type:varchar(255)"`
 	ProcessingStatus    string         `gorm:"type:varchar(50);default:'PENDING_PARSING';index:idx_rs_processing_status"`
@@ -158,6 +173,29 @@ type InterviewEvaluation struct {
 
 func (InterviewEvaluation) TableName() string {
 	return "interview_evaluations"
+}
+
+// ReviewedResume HR审阅简历记录表
+type ReviewedResume struct {
+	ReviewID       uint64    `gorm:"primaryKey;autoIncrement"`
+	JobID          string    `gorm:"type:char(36);not null;uniqueIndex:uq_reviewed_job_hr_text_md5,priority:1"`
+	HRID           string    `gorm:"type:char(36);not null;uniqueIndex:uq_reviewed_job_hr_text_md5,priority:2"` // 假设HR用户ID也是char(36)
+	TextMD5        string    `gorm:"type:char(32);not null;uniqueIndex:uq_reviewed_job_hr_text_md5,priority:3"`
+	SubmissionUUID *string   `gorm:"type:char(36)"` // 可空
+	Action         string    `gorm:"type:varchar(50);not null"`
+	ReasonText     string    `gorm:"type:text"`
+	IdempotencyKey *string   `gorm:"type:char(36);uniqueIndex:uq_reviewed_idempotency_key"` // 可空
+	Version        int       `gorm:"default:1"`
+	CreatedAt      time.Time `gorm:"type:datetime(6);default:CURRENT_TIMESTAMP(6)"`
+	UpdatedAt      time.Time `gorm:"type:datetime(6);default:CURRENT_TIMESTAMP(6);autoUpdateTime"`
+
+	Job              *Job              `gorm:"foreignKey:JobID;references:JobID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	ResumeSubmission *ResumeSubmission `gorm:"foreignKey:SubmissionUUID;references:SubmissionUUID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
+	// HRUser *HRUser `gorm:"foreignKey:HRID..."` // 如果有HR用户表的话
+}
+
+func (ReviewedResume) TableName() string {
+	return "reviewed_resumes"
 }
 
 // StringToJSON StringToJSON Helper function to convert string to datatypes.JSON

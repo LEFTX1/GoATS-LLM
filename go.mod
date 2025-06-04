@@ -7,10 +7,12 @@ require (
 	github.com/cloudwego/eino-ext/components/document/parser/pdf v0.0.0-20250527025003-c8588b6dc7a9
 	github.com/cloudwego/hertz v0.10.0
 	github.com/gofrs/uuid/v5 v5.3.2
+	github.com/hertz-contrib/logger/zerolog v1.0.0
 	github.com/minio/minio-go/v7 v7.0.69
 	github.com/rabbitmq/amqp091-go v1.9.0
 	github.com/redis/go-redis/v9 v9.8.0
 	github.com/rs/zerolog v1.34.0
+	github.com/spf13/pflag v1.0.6
 	github.com/stretchr/testify v1.10.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/datatypes v1.2.5

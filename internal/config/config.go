@@ -45,9 +45,11 @@ type Config struct {
 	} `yaml:"aliyun"`
 
 	Qdrant struct {
-		Endpoint   string `yaml:"endpoint"`
-		Collection string `yaml:"collection"`
-		Dimension  int    `yaml:"dimension"`
+		Endpoint           string `yaml:"endpoint"`
+		Collection         string `yaml:"collection"`
+		Dimension          int    `yaml:"dimension"`
+		APIKey             string `yaml:"api_key,omitempty"`    // 可选的API Key
+		DefaultSearchLimit int    `yaml:"default_search_limit"` // 新增：默认搜索结果数量
 	} `yaml:"qdrant"`
 
 	// Tika服务器配置
@@ -118,6 +120,8 @@ type RabbitMQConfig struct {
 	RawResumeQueue           string `yaml:"raw_resume_queue"`
 	LLMParsingQueue          string `yaml:"llm_parsing_queue"`
 	JobMatchingQueue         string `yaml:"job_matching_queue"`
+	QdrantVectorizeQueue     string `yaml:"qdrant_vectorize_queue,omitempty"` // 新增: Qdrant向量化队列
+	VectorizeRoutingKey      string `yaml:"vectorize_routing_key,omitempty"`  // 新增: Qdrant向量化路由键
 	PrefetchCount            int    `yaml:"prefetch_count"`
 	RetryInterval            string `yaml:"retry_interval"`
 	MaxRetries               int    `yaml:"max_retries"`
@@ -138,8 +142,9 @@ type MinIOConfig struct {
 	OriginalsBucket  string `yaml:"originalsBucket"`  // 原始简历存储桶
 	ParsedTextBucket string `yaml:"parsedTextBucket"` // 解析文本存储桶
 	// 新增对象生命周期管理
-	OriginalFileExpireDays int `yaml:"original_file_expire_days"` // 原始文件过期天数
-	ParsedTextExpireDays   int `yaml:"parsed_text_expire_days"`   // 解析文本过期天数
+	OriginalFileExpireDays int  `yaml:"original_file_expire_days"`     // 原始文件过期天数
+	ParsedTextExpireDays   int  `yaml:"parsed_text_expire_days"`       // 解析文本过期天数
+	EnableTestLogging      bool `yaml:"enable_test_logging,omitempty"` // 新增: 控制测试期间的详细日志记录
 }
 
 // MySQLConfig MySQL配置结构
@@ -192,11 +197,13 @@ type JobEvaluatorConfig struct {
 	RetryWaitSeconds int     `yaml:"retryWaitSeconds"` // 重试等待时间(秒)
 }
 
-// QdrantConfig 是Qdrant配置的别名，与现有Qdrant字段兼容
-type QdrantConfig = struct {
-	Endpoint   string `yaml:"endpoint"`
-	Collection string `yaml:"collection"`
-	Dimension  int    `yaml:"dimension"`
+// QdrantConfig Qdrant向量数据库配置
+type QdrantConfig struct {
+	Endpoint           string `yaml:"endpoint"`             // Qdrant gRPC 服务地址
+	Collection         string `yaml:"collection"`           // 集合名称
+	Dimension          int    `yaml:"dimension"`            // 向量维度
+	APIKey             string `yaml:"api_key,omitempty"`    // (可选) Qdrant API Key
+	DefaultSearchLimit int    `yaml:"default_search_limit"` // 新增：默认搜索结果数量
 }
 
 // LoggerConfig 日志配置
@@ -434,6 +441,7 @@ func createDefaultConfig() *Config {
 	config.MinIO.UseSSL = false
 	config.MinIO.BucketName = "originals"
 	config.MinIO.Location = ""
+	config.MinIO.EnableTestLogging = false // 默认在createDefaultConfig中设置为false
 
 	// MySQL默认配置
 	config.MySQL.Host = "localhost"
@@ -486,6 +494,7 @@ func createDefaultConfig() *Config {
 	// MinIO对象存储生命周期管理
 	config.MinIO.OriginalFileExpireDays = 1095 // 默认3年过期
 	config.MinIO.ParsedTextExpireDays = 1095   // 默认3年过期
+	config.MinIO.EnableTestLogging = false     // 默认在createDefaultConfig中设置为false (重复设置，保持一致)
 
 	// 日志默认配置
 	config.Logger.Level = "info"
@@ -502,6 +511,10 @@ func createDefaultConfig() *Config {
 		"qwen-turbo":        1200,
 		"qwen-turbo-latest": 1200,
 	}
+
+	// QdrantConfig 默认配置
+	config.Qdrant.APIKey = ""
+	config.Qdrant.DefaultSearchLimit = 10
 
 	return config
 }

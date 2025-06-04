@@ -118,11 +118,13 @@ func (m *MySQL) autoMigrateSchema() error {
 	err := m.db.AutoMigrate(
 		&models.Candidate{},
 		&models.Job{},
+		&models.JobVector{},
 		&models.ResumeSubmission{},
 		&models.ResumeSubmissionChunk{},
 		&models.JobSubmissionMatch{},
 		&models.Interviewer{},
 		&models.InterviewEvaluation{},
+		&models.ReviewedResume{},
 	)
 	if err != nil {
 		return fmt.Errorf("GORM自动迁移失败: %w", err)
@@ -238,4 +240,42 @@ func (m *MySQL) UpdateResumeSubmissionFields(tx *gorm.DB, submissionUUID string,
 // CreateJobSubmissionMatch 创建 JobSubmissionMatch 记录 (在事务中执行)
 func (m *MySQL) CreateJobSubmissionMatch(tx *gorm.DB, match *models.JobSubmissionMatch) error {
 	return tx.Create(match).Error
+}
+
+// GetJobByID 通过 JobID 获取 Job 记录
+func (m *MySQL) GetJobByID(db *gorm.DB, jobID string) (*models.Job, error) {
+	var job models.Job
+	if err := db.Where("job_id = ?", jobID).First(&job).Error; err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+// GetJobVectorByID 通过 JobID 获取 JobVector 记录
+func (m *MySQL) GetJobVectorByID(db *gorm.DB, jobID string) (*models.JobVector, error) {
+	var jobVector models.JobVector
+	if err := db.Where("job_id = ?", jobID).First(&jobVector).Error; err != nil {
+		return nil, err
+	}
+	return &jobVector, nil
+}
+
+// CreateJob 创建一个新的Job记录 (如果需要独立的创建方法)
+func (m *MySQL) CreateJob(tx *gorm.DB, job *models.Job) error {
+	return tx.Create(job).Error
+}
+
+// UpdateJob 更新一个已有的Job记录 (如果需要独立的更新方法)
+func (m *MySQL) UpdateJob(tx *gorm.DB, job *models.Job) error {
+	return tx.Save(job).Error // Save 会基于主键更新或创建
+}
+
+// CreateJobVector 创建一个新的JobVector记录
+func (m *MySQL) CreateJobVector(tx *gorm.DB, jobVector *models.JobVector) error {
+	return tx.Create(jobVector).Error
+}
+
+// UpdateJobVector 更新一个已有的JobVector记录
+func (m *MySQL) UpdateJobVector(tx *gorm.DB, jobVector *models.JobVector) error {
+	return tx.Save(jobVector).Error // Save 会基于主键更新或创建
 }

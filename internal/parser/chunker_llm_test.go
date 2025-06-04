@@ -6,7 +6,9 @@ import (
 	"ai-agent-go/internal/types"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -25,6 +27,12 @@ type MockLLMModel struct {
 	mockResponse string
 	// 记录绑定的工具 (可选，用于测试)
 	boundTools []*schema.ToolInfo
+	// 用于测试的错误
+	Err error
+	// 用于测试的调用次数
+	CallCount int
+	// 用于测试的成功调用次数
+	SucceedAfterNCalls int
 }
 
 // Generate 实现model.ChatModel接口
@@ -112,9 +120,10 @@ func TestLLMResumeChunker(t *testing.T) {
 	mockLLM := &MockLLMModel{
 		mockResponse: mockResponse,
 	}
+	testLogger := log.New(io.Discard, "", 0)
 
 	// 创建LLM简历分块器
-	chunker := NewLLMResumeChunker(mockLLM)
+	chunker := NewLLMResumeChunker(mockLLM, testLogger)
 
 	// 测试分块功能
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -232,6 +241,7 @@ func TestFewShotLearning(t *testing.T) {
 	mockLLM := &MockLLMModel{
 		mockResponse: mockResponse,
 	}
+	testLoggerForFewShot := log.New(io.Discard, "", 0)
 
 	// 创建带自定义少样本的LLM简历分块器
 	customExample := `示例：
@@ -279,7 +289,7 @@ func TestFewShotLearning(t *testing.T) {
   }
 }`
 
-	chunker := NewLLMResumeChunker(mockLLM, WithCustomFewShotExamples(customExample))
+	chunker := NewLLMResumeChunker(mockLLM, testLoggerForFewShot, WithCustomFewShotExamples(customExample))
 
 	// 测试分块功能
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -374,9 +384,10 @@ func TestJSONFormatHandling(t *testing.T) {
 	mockLLM := &MockLLMModel{
 		mockResponse: mockResponse,
 	}
+	testLoggerForJSONHandling := log.New(io.Discard, "", 0)
 
 	// 创建LLM简历分块器
-	chunker := NewLLMResumeChunker(mockLLM)
+	chunker := NewLLMResumeChunker(mockLLM, testLoggerForJSONHandling)
 
 	// 测试分块功能
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -511,10 +522,11 @@ func TestRealResumeParsing(t *testing.T) {
 	// 使用函数选项模式创建不带元数据的Tika解析器
 	tikaExtractor := NewTikaPDFExtractor(
 		cfg.Tika.ServerURL,
-		WithMinimalMetadata(false),  // 不提取精简元数据
-		WithFullMetadata(false),     // 不提取完整元数据
-		WithTimeout(30*time.Second), // 设置30秒超时
-		WithAnnotations(false),      // 禁用链接注释提取
+		WithMinimalMetadata(false),                 // 不提取精简元数据
+		WithFullMetadata(false),                    // 不提取完整元数据
+		WithTimeout(30*time.Second),                // 设置30秒超时
+		WithAnnotations(false),                     // 禁用链接注释提取
+		WithTikaLogger(log.New(io.Discard, "", 0)), // 为Tika添加丢弃型logger
 	)
 	t.Log("创建了不带元数据的Tika解析器，并禁用了链接注释提取")
 
@@ -591,9 +603,9 @@ func TestRealResumeParsing(t *testing.T) {
 		}
 		t.Fatalf("初始化真实LLM模型失败: %v", err)
 	}
-
+	testLoggerForRealLLM := log.New(io.Discard, "", 0)
 	// 创建LLM简历分块器
-	chunker := NewLLMResumeChunker(llmModel)
+	chunker := NewLLMResumeChunker(llmModel, testLoggerForRealLLM)
 
 	// 使用从PDF提取的文本进行测试
 	t.Log("开始使用LLM解析简历文本...")
@@ -713,7 +725,7 @@ func TestRealLLMChunker(t *testing.T) {
 	}
 
 	// 创建LLM简历分块器
-	chunker := NewLLMResumeChunker(llmModel)
+	chunker := NewLLMResumeChunker(llmModel, log.New(io.Discard, "", 0))
 
 	// 测试简历文本 (使用周航航的简历作为例子，因为它在提示词中出现过)
 	resumeText := `周航航
@@ -948,9 +960,9 @@ func TestLLMWithDataAnalystResume(t *testing.T) {
 		}
 		t.Fatalf("初始化真实LLM模型失败: %v", err)
 	}
-
+	testLoggerForDataAnalyst := log.New(io.Discard, "", 0)
 	// 创建LLM简历分块器
-	chunker := NewLLMResumeChunker(llmModel)
+	chunker := NewLLMResumeChunker(llmModel, testLoggerForDataAnalyst)
 
 	// 数据分析师简历文本
 	resumeText := `王浩宇
@@ -1210,9 +1222,9 @@ func TestLLMWithMixedExperienceResume(t *testing.T) {
 		}
 		t.Fatalf("初始化真实LLM模型失败: %v", err)
 	}
-
+	testLoggerForMixedExp := log.New(io.Discard, "", 0)
 	// 创建LLM简历分块器
-	chunker := NewLLMResumeChunker(llmModel)
+	chunker := NewLLMResumeChunker(llmModel, testLoggerForMixedExp)
 
 	// 张伟的简历文本 (同时包含实习和工作经验) - 可以稍微调整为揉成一团的格式以增加挑战
 	resumeText := `张伟
@@ -1439,10 +1451,11 @@ func TestLLMChunkerWithRealResume(t *testing.T) {
 	t.Log("【步骤1】创建不带元数据的Tika PDF解析器...")
 	tikaExtractor := NewTikaPDFExtractor(
 		cfg.Tika.ServerURL,
-		WithMinimalMetadata(false),  // 不提取精简元数据
-		WithFullMetadata(false),     // 不提取完整元数据
-		WithTimeout(30*time.Second), // 设置30秒超时
-		WithAnnotations(false),      // 禁用链接注释提取，避免URL重复
+		WithMinimalMetadata(false),                 // 不提取精简元数据
+		WithFullMetadata(false),                    // 不提取完整元数据
+		WithTimeout(30*time.Second),                // 设置30秒超时
+		WithAnnotations(false),                     // 禁用链接注释提取，避免URL重复
+		WithTikaLogger(log.New(io.Discard, "", 0)), // 为Tika添加丢弃型logger
 	)
 	t.Log("Tika解析器创建成功，配置为不提取任何元数据且禁用链接注释提取")
 
@@ -1497,10 +1510,10 @@ func TestLLMChunkerWithRealResume(t *testing.T) {
 		t.Fatalf("初始化LLM模型失败: %v", err)
 	}
 	t.Log("LLM模型初始化成功")
-
+	testLoggerForRealResumeWithTika := log.New(io.Discard, "", 0)
 	// 5. 创建LLM简历分块器
 	t.Log("【步骤5】创建LLM简历分块器...")
-	chunker := NewLLMResumeChunker(llmModel)
+	chunker := NewLLMResumeChunker(llmModel, testLoggerForRealResumeWithTika)
 	t.Log("LLM简历分块器创建成功")
 
 	// 6. 使用LLM解析PDF文本
@@ -1704,4 +1717,350 @@ func ternary(condition bool, trueVal, falseVal string) string {
 		return trueVal
 	}
 	return falseVal
+}
+
+// TestLLMResumeChunker_ChunkResume tests the ChunkResume method of LLMResumeChunker
+func TestLLMResumeChunker_ChunkResume(t *testing.T) {
+	// Mock LLM Model
+	mockLLM := &MockLLMModel{}
+
+	// Create a discard logger for testing
+	testLogger := log.New(io.Discard, "", 0)
+
+	// Test cases
+	testCases := []struct {
+		name               string
+		resumeText         string
+		mockLLMResponse    string
+		mockLLMError       error
+		options            []LLMChunkerOption
+		expectedSections   []*types.ResumeSection
+		expectedBasicInfo  map[string]string
+		expectError        bool
+		expectedErrorMsg   string
+		validateOutputFunc func(t *testing.T, sections []*types.ResumeSection, basicInfo map[string]string, err error)
+	}{
+		{
+			name:       "Successful parsing with default prompt",
+			resumeText: "John Doe, Software Engineer, john.doe@example.com, 123-456-7890. Education: BSc Computer Science. Skills: Go, Python.",
+			mockLLMResponse: `{
+				"basic_info": {"name": "John Doe", "email": "john.doe@example.com", "phone": "123-456-7890", "position": "Software Engineer"},
+				"chunks": [
+					{"chunk_id": 1, "resume_identifier": "John Doe_123-456-7890", "type": "BASIC_INFO", "title": "Basic Information", "content": "John Doe, Software Engineer, john.doe@example.com, 123-456-7890."},
+					{"chunk_id": 2, "resume_identifier": "John Doe_123-456-7890", "type": "EDUCATION", "title": "Education", "content": "BSc Computer Science"},
+					{"chunk_id": 3, "resume_identifier": "John Doe_123-456-7890", "type": "SKILLS", "title": "Skills", "content": "Go, Python"}
+				],
+				"metadata": {"is_211": false, "is_985": false, "is_double_top": false, "has_intern": false, "highest_education": "BSc", "years_of_experience": 0, "resume_score": 75, "tags": ["Software Engineer"]}
+			}`,
+			options: []LLMChunkerOption{},
+			expectedSections: []*types.ResumeSection{
+				{Type: types.SectionBasicInfo, Title: "Basic Information", Content: "John Doe, Software Engineer, john.doe@example.com, 123-456-7890.", ChunkID: 1, ResumeIdentifier: "John Doe_123-456-7890"},
+				{Type: types.SectionEducation, Title: "Education", Content: "BSc Computer Science", ChunkID: 2, ResumeIdentifier: "John Doe_123-456-7890"},
+				{Type: types.SectionSkills, Title: "Skills", Content: "Go, Python", ChunkID: 3, ResumeIdentifier: "John Doe_123-456-7890"},
+			},
+			expectedBasicInfo: map[string]string{
+				"name": "John Doe", "email": "john.doe@example.com", "phone": "123-456-7890", "position": "Software Engineer",
+				"is_211": "false", "is_985": "false", "is_double_top": "false", "has_intern": "false",
+				"highest_education": "BSc", "years_of_experience": "0.0", "resume_score": "75", "tags": "Software Engineer",
+			},
+			expectError: false,
+		},
+		{
+			name:             "LLM call returns error",
+			resumeText:       "Some resume text.",
+			mockLLMError:     errors.New("LLM communication error"),
+			options:          []LLMChunkerOption{},
+			expectError:      true,
+			expectedErrorMsg: "LLM调用失败: LLM communication error",
+		},
+		{
+			name:             "LLM response is not valid JSON",
+			resumeText:       "Some resume text.",
+			mockLLMResponse:  "This is not JSON.",
+			options:          []LLMChunkerOption{},
+			expectError:      true,
+			expectedErrorMsg: "解析LLM响应失败: 无法从LLM响应中提取有效的JSON",
+		},
+		{
+			name:             "LLM response JSON is malformed",
+			resumeText:       "Another resume.",
+			mockLLMResponse:  `{"basic_info": {"name": "Jane"}, "chunks": [{"type": "EDUCATION", "content": "MSc AI"}`, // Malformed
+			options:          []LLMChunkerOption{},
+			expectError:      true,
+			expectedErrorMsg: "解析LLM响应失败: 解析JSON失败: unexpected end of JSON input",
+		},
+		{
+			name:       "Successful parsing with custom few-shot examples",
+			resumeText: "Jane Doe, AI Researcher, jane.doe@example.com, 098-765-4321. Education: MSc AI. Skills: TensorFlow, PyTorch.",
+			mockLLMResponse: `{
+				"basic_info": {"name": "Jane Doe", "email": "jane.doe@example.com", "phone": "098-765-4321", "position": "AI Researcher"},
+				"chunks": [
+					{"chunk_id": 1, "resume_identifier": "Jane Doe_098-765-4321", "type": "BASIC_INFO", "title": "Personal Details", "content": "Jane Doe, AI Researcher, jane.doe@example.com, 098-765-4321."},
+					{"chunk_id": 2, "resume_identifier": "Jane Doe_098-765-4321", "type": "EDUCATION", "title": "Education History", "content": "MSc AI"},
+					{"chunk_id": 3, "resume_identifier": "Jane Doe_098-765-4321", "type": "SKILLS", "title": "Technical Skills", "content": "TensorFlow, PyTorch"}
+				],
+				"metadata": {"is_211": true, "is_985": true, "is_double_top": true, "has_intern": true, "highest_education": "MSc", "years_of_experience": 1.5, "resume_score": 88, "tags": ["AI", "Research", "Top School"]}
+			}`,
+			options: []LLMChunkerOption{WithCustomFewShotExamples("Custom example prompt...")},
+			expectedSections: []*types.ResumeSection{
+				{Type: types.SectionBasicInfo, Title: "Personal Details", Content: "Jane Doe, AI Researcher, jane.doe@example.com, 098-765-4321.", ChunkID: 1, ResumeIdentifier: "Jane Doe_098-765-4321"},
+				{Type: types.SectionEducation, Title: "Education History", Content: "MSc AI", ChunkID: 2, ResumeIdentifier: "Jane Doe_098-765-4321"},
+				{Type: types.SectionSkills, Title: "Technical Skills", Content: "TensorFlow, PyTorch", ChunkID: 3, ResumeIdentifier: "Jane Doe_098-765-4321"},
+			},
+			expectedBasicInfo: map[string]string{
+				"name": "Jane Doe", "email": "jane.doe@example.com", "phone": "098-765-4321", "position": "AI Researcher",
+				"is_211": "true", "is_985": "true", "is_double_top": "true", "has_intern": "true",
+				"highest_education": "MSc", "years_of_experience": "1.5", "resume_score": "88", "tags": "AI,Research,Top School",
+			},
+			expectError: false,
+		},
+		{
+			name:             "Context cancellation during LLM call",
+			resumeText:       "Cancel me.",
+			mockLLMError:     context.Canceled,
+			options:          []LLMChunkerOption{},
+			expectError:      true,
+			expectedErrorMsg: "LLM调用失败: 上下文已取消: context canceled",
+			validateOutputFunc: func(t *testing.T, sections []*types.ResumeSection, basicInfo map[string]string, err error) {
+				require.ErrorIs(t, err, context.Canceled, "Error should be context.Canceled or wrap it")
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset mock LLM for each test case
+			mockLLM.mockResponse = tc.mockLLMResponse
+			mockLLM.Err = tc.mockLLMError
+
+			chunker := NewLLMResumeChunker(mockLLM, testLogger, tc.options...) // Pass testLogger
+			sections, basicInfo, err := chunker.ChunkResume(context.Background(), tc.resumeText)
+
+			if tc.expectError {
+				require.Error(t, err, "Expected an error but got none.")
+				if tc.expectedErrorMsg != "" {
+					require.Contains(t, err.Error(), tc.expectedErrorMsg, "Error message mismatch.")
+				}
+			} else {
+				require.NoError(t, err, "Expected no error but got one: %v", err)
+				require.Equal(t, len(tc.expectedSections), len(sections), "Number of sections mismatch.")
+				for i := range tc.expectedSections {
+					require.Equal(t, tc.expectedSections[i].Type, sections[i].Type, "Section type mismatch at index %d.", i)
+					require.Equal(t, tc.expectedSections[i].Title, sections[i].Title, "Section title mismatch at index %d.", i)
+					require.Equal(t, tc.expectedSections[i].Content, sections[i].Content, "Section content mismatch at index %d.", i)
+					require.Equal(t, tc.expectedSections[i].ChunkID, sections[i].ChunkID, "ChunkID mismatch at index %d.", i)
+					require.Equal(t, tc.expectedSections[i].ResumeIdentifier, sections[i].ResumeIdentifier, "ResumeIdentifier mismatch at index %d.", i)
+				}
+				require.Equal(t, tc.expectedBasicInfo, basicInfo, "Basic info mismatch.")
+			}
+
+			if tc.validateOutputFunc != nil {
+				tc.validateOutputFunc(t, sections, basicInfo, err)
+			}
+		})
+	}
+}
+
+func TestLLMResumeChunker_generatePromptTemplate(t *testing.T) {
+	mockLLM := &MockLLMModel{}
+	testLogger := log.New(io.Discard, "", 0) // Create a discard logger
+
+	t.Run("Default prompt generation", func(t *testing.T) {
+		chunker := NewLLMResumeChunker(mockLLM, testLogger) // Pass testLogger
+		require.NotEmpty(t, chunker.promptTemplate, "Default prompt template should not be empty")
+		require.Contains(t, chunker.promptTemplate, "你是一个专业的简历解析专家", "Prompt should contain core instruction")
+		require.Contains(t, chunker.promptTemplate, "提取以下字段 -> %s", "Prompt should contain field placeholder")
+		require.Contains(t, chunker.promptTemplate, "识别并将内容归类到以下类型 -> %s", "Prompt should contain section placeholder")
+		require.Contains(t, chunker.promptTemplate, "示例1 (演示：BASIC_INFO提取", "Prompt should contain few-shot examples by default")
+	})
+
+	t.Run("Prompt generation with custom few-shot examples", func(t *testing.T) {
+		customExample := "This is a custom few-shot example."
+		chunker := NewLLMResumeChunker(mockLLM, testLogger, WithCustomFewShotExamples(customExample)) // Pass testLogger
+		require.NotEmpty(t, chunker.promptTemplate, "Prompt template should not be empty")
+		require.Contains(t, chunker.promptTemplate, customExample, "Prompt should contain the custom few-shot example")
+		require.Contains(t, chunker.promptTemplate, "你是一个专业的简历解析专家", "Prompt should still contain core instruction after custom examples")
+	})
+}
+
+func TestLLMResumeChunker_generateFewShotExamples(t *testing.T) {
+	mockLLM := &MockLLMModel{}
+	testLogger := log.New(io.Discard, "", 0)
+	chunker := NewLLMResumeChunker(mockLLM, testLogger) // Pass testLogger
+	// Call explicitly for this test, though NewLLMResumeChunker calls it if empty
+	chunker.generateFewShotExamples()
+	require.NotEmpty(t, chunker.fewShotExamples, "Few-shot examples should not be empty after generation")
+	require.Contains(t, chunker.fewShotExamples, "示例1", "Few-shot examples should contain example 1")
+	require.Contains(t, chunker.fewShotExamples, "王小明", "Few-shot examples content check")
+}
+
+func TestLLMResumeChunker_callLLM_Retries(t *testing.T) {
+	mockLLM := &MockLLMModel{}
+	testLogger := log.New(io.Discard, "", 0) // Create a discard logger
+
+	chunker := NewLLMResumeChunker(mockLLM, testLogger) // Pass testLogger
+
+	t.Run("Successful call on first try", func(t *testing.T) {
+		mockLLM.mockResponse = `{"status": "ok"}`
+		mockLLM.Err = nil
+		mockLLM.CallCount = 0
+		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt")
+		require.NoError(t, err)
+		require.Equal(t, 1, mockLLM.CallCount, "LLM should be called once")
+	})
+
+	t.Run("Successful call after one retry (timeout)", func(t *testing.T) {
+		mockLLM.CallCount = 0
+		mockLLM.Err = errors.New("some network timeout error") // First call fails
+		// Configure mock to succeed on the second call
+		mockLLM.SucceedAfterNCalls = 2
+		mockLLM.mockResponse = `{"status": "ok_after_retry"}`
+
+		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt retry")
+		require.NoError(t, err)
+		require.Equal(t, 2, mockLLM.CallCount, "LLM should be called twice")
+	})
+
+	t.Run("Fails after max retries", func(t *testing.T) {
+		mockLLM.CallCount = 0
+		mockLLM.Err = errors.New("persistent connection refused") // All calls fail
+		mockLLM.SucceedAfterNCalls = 0                            // Never succeed
+
+		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt fail")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "LLM Generate failed: persistent connection refused")
+		// Default maxRetries in callLLM is 2, so total calls = 1 (initial) + 2 (retries) = 3
+		require.Equal(t, 3, mockLLM.CallCount, "LLM should be called max_retries + 1 times")
+	})
+
+	t.Run("Non-retryable error, no retry", func(t *testing.T) {
+		mockLLM.CallCount = 0
+		mockLLM.Err = errors.New("invalid API key") // Non-retryable error
+		mockLLM.SucceedAfterNCalls = 0
+
+		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt non-retry")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "LLM Generate failed: invalid API key")
+		require.Equal(t, 1, mockLLM.CallCount, "LLM should be called only once for non-retryable error")
+	})
+
+	t.Run("Context cancelled during retry wait", func(t *testing.T) {
+		mockLLM.CallCount = 0
+		mockLLM.Err = errors.New("timeout error") // Retryable error
+		mockLLM.SucceedAfterNCalls = 0            // Configure to always fail to trigger retries
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		go func() {
+			time.Sleep(100 * time.Millisecond) // Give a little time for the first call
+			cancel()                           // Cancel context during the retry delay
+		}()
+
+		_, err := chunker.callLLM(ctx, "system prompt", "user prompt cancel")
+		require.Error(t, err)
+		// The error could be the original "timeout error" if the context is cancelled before retry logic even starts,
+		// or "context canceled" if it's cancelled during the retry wait or subsequent call.
+		// Check if it's one of the expected errors.
+		isExpectedError := strings.Contains(err.Error(), "LLM Generate failed: timeout error") ||
+			strings.Contains(err.Error(), "上下文已取消: context canceled")
+		require.True(t, isExpectedError, "Expected error to be 'timeout error' or 'context canceled', got: %v", err)
+
+		// Call count can be 1 or 2 depending on timing
+		require.LessOrEqual(t, mockLLM.CallCount, 2, "LLM call count should be at most 2")
+		require.GreaterOrEqual(t, mockLLM.CallCount, 1, "LLM call count should be at least 1")
+	})
+}
+
+// TestExtractJSON tests the extractJSON utility function
+func TestExtractJSON(t *testing.T) {
+	testCases := []struct {
+		name         string
+		inputText    string
+		expectedJSON string
+	}{
+		{
+			name:         "Simple JSON object",
+			inputText:    `{"key": "value"}`,
+			expectedJSON: `{"key": "value"}`,
+		},
+		{
+			name:         "JSON object with leading/trailing whitespace",
+			inputText:    `  {"key": "value", "number": 123}  `,
+			expectedJSON: `{"key": "value", "number": 123}`,
+		},
+		{
+			name: "JSON wrapped in markdown code block",
+			inputText: "Some text before ```json\n" +
+				"{\"key\": \"value\", \"nested\": {\"num\": 42}}\n" +
+				"``` and after.",
+			expectedJSON: `{"key": "value", "nested": {"num": 42}}`,
+		},
+
+		{
+			name:         "JSON wrapped in markdown code block with extra spaces",
+			inputText:    "```json   \n  {\"key\": \"value\"} \n  ```",
+			expectedJSON: `{"key": "value"}`,
+		},
+		{
+			name:         "JSON with internal newlines and spaces",
+			inputText:    `{"message": "Hello\nWorld", "data": [1, 2, {"info": "  spaced  "}]}`,
+			expectedJSON: `{"message": "Hello\nWorld", "data": [1, 2, {"info": "  spaced  "}]}`,
+		},
+		{
+			name:         "No JSON content",
+			inputText:    "This is just plain text.",
+			expectedJSON: "",
+		},
+		{
+			name:         "Incomplete JSON (missing closing brace)",
+			inputText:    `{"key": "value"`,
+			expectedJSON: "",
+		},
+		{
+			name:         "Multiple JSON objects (should extract first valid one)",
+			inputText:    `{"first": true}{\"second\": false}`,
+			expectedJSON: `{"first": true}`,
+		},
+		{
+			name:         "JSON within other text, no markdown",
+			inputText:    `Preamble text. {"data": "important"}. Postamble text.`,
+			expectedJSON: `{"data": "important"}`,
+		},
+		{
+			name:         "Malformed JSON in markdown (test regex robustness)",
+			inputText:    "```json\n{\"key\": value_not_string}\n```",
+			expectedJSON: `{"key": value_not_string}`,
+		},
+		{
+			name: "JSON with escaped quotes and newlines in markdown",
+			inputText: "```json\n" +
+				`{"summary": "This is a summary with a \"quote\" and a newline\nhere."}` +
+				"\n```",
+			expectedJSON: `{"summary": "This is a summary with a \"quote\" and a newline\nhere."}`,
+		},
+		{
+			name:         "JSON with mixed valid and invalid parts in markdown (extracts first valid block)",
+			inputText:    "```json\n{\"valid\": true}\n```\nSome other text and an invalid block: ```json\n{\"invalid\": not_a_string oops\n```",
+			expectedJSON: `{"valid": true}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			extracted := extractJSON(tc.inputText)
+			require.Equal(t, tc.expectedJSON, extracted)
+
+			// Optionally, try to parse the extracted JSON if we expect it to be valid
+			if tc.expectedJSON != "" {
+				var jsonData interface{}
+				err := json.Unmarshal([]byte(extracted), &jsonData)
+				// For "Malformed JSON in markdown", we expect regex to extract, but unmarshal to fail
+				if tc.name == "Malformed JSON in markdown (test regex robustness)" {
+					require.Error(t, err, "Extracted content for malformed case should not unmarshal cleanly")
+				} else {
+					require.NoError(t, err, "Extracted JSON string should be valid parsable JSON, but got error: %v. Extracted: '%s'", err, extracted)
+				}
+			}
+		})
+	}
 }

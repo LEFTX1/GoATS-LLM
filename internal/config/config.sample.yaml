@@ -10,8 +10,10 @@ aliyun:
 # Qdrant向量数据库配置
 qdrant:
   endpoint: "http://localhost:6333"
-  collection: "resumes"
-  dimension: 1024
+  collection: "resume_chunks"
+  dimension: 1536
+  api_key: ""
+  default_search_limit: 10
 
 # RabbitMQ消息队列配置
 rabbitmq:
@@ -55,3 +57,5 @@ server:
   address: ":8080" # HTTP服务监听地址和端口
 
 # LLM解析器配置 (示例) 
+tika:
+  type: "eino" # PDF解析器类型: "tika" 或 "eino" (默认) 

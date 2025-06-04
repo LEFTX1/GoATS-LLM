@@ -4,7 +4,9 @@ import (
 	"ai-agent-go/internal/agent"
 	"ai-agent-go/internal/config"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -80,7 +82,8 @@ func TestLLMJobEvaluatorWithRealModel(t *testing.T) {
 	}
 
 	// 创建评估器
-	evaluator := NewLLMJobEvaluator(llmModel)
+	testLogger := log.New(io.Discard, "", 0)
+	evaluator := NewLLMJobEvaluator(llmModel, testLogger)
 
 	// 测试评估功能
 	jdText := `高级后端开发工程师
@@ -151,7 +154,8 @@ func TestInvalidResponseWithRealModel(t *testing.T) {
 		t.Fatalf("初始化真实LLM模型失败: %v", err)
 	}
 
-	evaluator := NewLLMJobEvaluator(llmModel)
+	testLoggerInvalidResp := log.New(io.Discard, "", 0)
+	evaluator := NewLLMJobEvaluator(llmModel, testLoggerInvalidResp)
 
 	// 测试极端情况：提供不合理/不充分的输入，可能导致LLM无法正确生成JSON格式
 	// 注：这个测试可能不稳定，因为真实LLM可能仍然尝试生成有效的JSON
@@ -190,7 +194,8 @@ func TestKeywordMatchingWithRealLLM(t *testing.T) {
 		}
 		t.Fatalf("初始化真实LLM模型失败: %v", err)
 	}
-	evaluator := NewLLMJobEvaluator(llmModel)
+	testLoggerKeyword := log.New(io.Discard, "", 0)
+	evaluator := NewLLMJobEvaluator(llmModel, testLoggerKeyword)
 
 	// 测试用例：应届生限制
 	t.Run("应届生限制", func(t *testing.T) {
@@ -272,7 +277,8 @@ func TestRealLLMJobEvaluator(t *testing.T) {
 	}
 
 	// 创建评估器
-	evaluator := NewLLMJobEvaluator(llmModel)
+	testLogger := log.New(io.Discard, "", 0)
+	evaluator := NewLLMJobEvaluator(llmModel, testLogger)
 
 	// 测试数据集
 	testCases := []struct {
@@ -851,6 +857,124 @@ func TestMatchScoreRangeValidation(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err, "不应返回错误")
+			}
+		})
+	}
+}
+
+// TestSanitizeJSON 验证 sanitizeJSON 函数是否能正确处理包含未转义引号的JSON片段
+func TestSanitizeJSON(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string // Go string literal for the input to sanitizeJSON
+		expected string // Go string literal for the expected output from sanitizeJSON
+		validOut bool
+		// For unmarshal check, what the value of a specific key should be AFTER unmarshalling the sanitized string
+		unmarshalCheckKey   string
+		unmarshalCheckValue string
+	}{
+		{
+			name:                "Already valid JSON with escaped quote",
+			input:               `{"a":"foo \\"bar\\" baz"}`,   // Actual input: {"a":"foo \"bar\" baz"}
+			expected:            `{"a":"foo \\\"bar\\\" baz"}`, // Based on actual output from sanitizeJSON
+			validOut:            true,
+			unmarshalCheckKey:   "a",
+			unmarshalCheckValue: `foo \"bar\" baz`, // Based on actual unmarshaling result
+		},
+		{
+			name:                "JSON with unescaped inner quote",
+			input:               `{"key":"value "with" quote"}`,   // Actual input: {"key":"value "with" quote"}
+			expected:            `{"key":"value \"with\" quote"}`, // Based on actual output from sanitizeJSON
+			validOut:            true,
+			unmarshalCheckKey:   "key",
+			unmarshalCheckValue: `value "with" quote`,
+		},
+		{
+			name:                "JSON with multiple unescaped inner quotes",
+			input:               `{"text":"this is a "quote" and another "one""}`,
+			expected:            `{"text":"this is a \"quote\" and another \"one\""}`, // Based on actual output
+			validOut:            true,
+			unmarshalCheckKey:   "text",
+			unmarshalCheckValue: `this is a "quote" and another "one"`,
+		},
+		{
+			name:                "No quotes inside string",
+			input:               `{"message":"hello world"}`,
+			expected:            `{"message":"hello world"}`,
+			validOut:            true,
+			unmarshalCheckKey:   "message",
+			unmarshalCheckValue: "hello world",
+		},
+		{
+			name:                "String with only escaped quotes",
+			input:               `{"data":"\\"a\\" \\"b\\" \\"c\\""}`,       // Actual input: {"data":"\"a\" \"b\" \"c\""}
+			expected:            `{"data":"\\\"a\\\" \\\"b\\\" \\\"c\\\""}`, // Based on actual output
+			validOut:            true,
+			unmarshalCheckKey:   "data",
+			unmarshalCheckValue: `\"a\" \"b\" \"c\"`, // Based on actual unmarshaling result
+		},
+		{
+			name:     "Empty JSON object",
+			input:    `{}`,
+			expected: `{}`,
+			validOut: true, // Unmarshal to empty map
+		},
+		{
+			name:     "JSON with nested structure and unescaped quote",
+			input:    `{"outer":{"inner_key":"value "problem" here"}}`,
+			expected: `{"outer":{"inner_key":"value \"problem\" here"}}`, // Based on actual output
+			validOut: false,                                              // Test unmarshal to map[string]interface{} for this one if needed.
+			// For map[string]string, this will fail unmarshalling directly.
+		},
+		{
+			name:                "String starting and ending with quotes that need escaping",
+			input:               `{"field":""innermost""}`,   // Actual input: {"field":""innermost""} (string value is "innermost" with quotes)
+			expected:            `{"field":"\"innermost\""}`, // Based on actual output
+			validOut:            true,
+			unmarshalCheckKey:   "field",
+			unmarshalCheckValue: `"innermost"`,
+		},
+		{
+			name: "String with backslashes near quotes",
+			// Input Go literal: `{"path":"C:\\\\Users\\\\\\"name\\"\\\\file.txt"}`
+			// Actual string input to sanitizeJSON: `{"path":"C:\\Users\\"name"\\file.txt"}`
+			// The value of "path" is: `C:\Users\"name"\file.txt`
+			input:               `{"path":"C:\\\\Users\\\\\\"name\\"\\\\file.txt"}`,
+			expected:            `{"path":"C:\\\\Users\\\\\\\"name\\\"\\\\file.txt"}`, // Based on actual output
+			validOut:            true,
+			unmarshalCheckKey:   "path",
+			unmarshalCheckValue: `C:\\Users\\\"name\"\\file.txt`, // Based on actual unmarshaling result
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixed := sanitizeJSON(tc.input)
+			assert.Equal(t, tc.expected, fixed, "Sanitized output did not match expected output.")
+
+			if tc.validOut {
+				if tc.name == "JSON with nested structure and unescaped quote" {
+					var m map[string]interface{} // Use interface for nested
+					err := json.Unmarshal([]byte(fixed), &m)
+					assert.NoError(t, err, "Sanitized JSON should be unmarshallable into map[string]interface{}")
+					if outer, ok := m["outer"].(map[string]interface{}); ok {
+						assert.Equal(t, `value "problem" here`, outer["inner_key"])
+					} else {
+						assert.Fail(t, "Outer key not a map")
+					}
+				} else if tc.name == "Empty JSON object" {
+					var m map[string]string
+					err := json.Unmarshal([]byte(fixed), &m)
+					assert.NoError(t, err, "Sanitized JSON should be unmarshallable into map[string]string")
+					assert.Empty(t, m, "Map should be empty")
+				} else {
+					var m map[string]string
+					err := json.Unmarshal([]byte(fixed), &m)
+					assert.NoError(t, err, "Sanitized JSON should be unmarshallable into map[string]string")
+					if tc.unmarshalCheckKey != "" {
+						assert.Equal(t, tc.unmarshalCheckValue, m[tc.unmarshalCheckKey], "Unmarshalled value does not match.")
+					}
+				}
 			}
 		})
 	}

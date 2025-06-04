@@ -1,6 +1,8 @@
 package processor
 
 import (
+	"ai-agent-go/internal/config"
+	"ai-agent-go/internal/storage"
 	"ai-agent-go/internal/types"
 	"context"
 	"io"
@@ -148,7 +150,11 @@ func TestResumeProcessor(t *testing.T) {
 
 	// 测试默认处理器创建
 	t.Run("DefaultProcessorCreation", func(t *testing.T) {
-		processor, err := CreateDefaultProcessor(ctx, nil)
+		// 为 CreateDefaultProcessor 提供必要的参数
+		var mockStorageManager *storage.Storage // 可以是nil，如果函数允许
+		var testConfig config.Config            // 使用一个空的config实例，而不是nil
+
+		processor, err := CreateDefaultProcessor(ctx, &testConfig, mockStorageManager)
 		require.NoError(t, err)
 
 		// 验证默认组件

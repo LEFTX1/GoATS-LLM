@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
+	"strings"
 
 	// "github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/embedding"
@@ -43,6 +46,7 @@ type AliyunEmbedder struct {
 	dimensions int    // Default dimensions
 	httpClient *http.Client
 	baseURL    string
+	logger     *log.Logger // Added logger
 }
 
 // NewAliyunEmbedder 创建新的阿里云Embedder (using OpenAI compatible endpoint)
@@ -67,6 +71,7 @@ func NewAliyunEmbedder(apiKey string, embeddingCfg config.EmbeddingConfig) (*Ali
 		dimensions: dimensions,
 		httpClient: &http.Client{},
 		baseURL:    baseURL,
+		logger:     log.New(os.Stderr, "[AliyunEmbedder] ", log.LstdFlags|log.Lshortfile), // Initialize logger
 	}
 
 	return embedder, nil
@@ -118,6 +123,8 @@ type AliyunOpenAIError struct {
 
 // EmbedStrings 将文本转换为向量, 实现 cloudwego/eino embedding.Embedder 接口
 func (a *AliyunEmbedder) EmbedStrings(ctx context.Context, texts []string, opts ...embedding.Option) ([][]float64, error) {
+	a.logger.Printf("EmbedStrings called with %d texts. First text (if any): %.100s...", len(texts), firstText(texts))
+
 	// 1. Handle options
 	options := &embedding.Options{}
 	embedding.GetCommonOptions(options, opts...)
@@ -154,8 +161,10 @@ func (a *AliyunEmbedder) EmbedStrings(ctx context.Context, texts []string, opts 
 
 	// 4. OnStart callback (Commented out)
 	// ctx = cbManager.OnStart(ctx, runInfo, cbInput)
+	a.logger.Printf("Effective model: %s, Effective dimensions: %d", effectiveModel, effectiveDimensions)
 
 	if len(texts) == 0 {
+		a.logger.Println("EmbedStrings: No texts to embed, returning empty.")
 		outputEmbeddings := [][]float64{}
 		// cbOutput := &embedding.CallbackOutput{ // (Commented out)
 		// 	Embeddings: outputEmbeddings,
@@ -182,107 +191,176 @@ func (a *AliyunEmbedder) EmbedStrings(ctx context.Context, texts []string, opts 
 		reqBody.Dimensions = effectiveDimensions
 	}
 
+	// Log input text details
+	if len(texts) == 1 {
+		a.logger.Printf("[AliyunEmbedder] Embedding 1 text (first 100 chars): %.100s", texts[0])
+	} else if len(texts) > 1 {
+		a.logger.Printf("[AliyunEmbedder] Embedding %d texts. First text (first 100 chars): %.100s", len(texts), texts[0])
+	}
+	a.logger.Printf("[AliyunEmbedder] AliyunOpenAIEmbeddingRequest details: Model=%s, Dimensions=%d, InputType=%T", reqBody.Model, reqBody.Dimensions, reqBody.Input)
+
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		err = fmt.Errorf("序列化请求失败: %w", err)
+		a.logger.Printf("[AliyunEmbedder] Error marshalling request: %v", err)
 		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
 		return nil, err
 	}
+	a.logger.Printf("[AliyunEmbedder] Marshalled JSON request: %s", string(jsonData))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		err = fmt.Errorf("创建HTTP请求失败: %w", err)
+		a.logger.Printf("[AliyunEmbedder] Error creating HTTP request: %v", err)
 		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
 		return nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	a.logger.Printf("[AliyunEmbedder] Sending HTTP request to %s with Authorization Bearer token (length: %d)", a.baseURL, len(a.apiKey))
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		err = fmt.Errorf("发送HTTP请求失败: %w", err)
+		a.logger.Printf("[AliyunEmbedder] Error sending HTTP request: %v", err)
 		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	a.logger.Printf("[AliyunEmbedder] Received HTTP response. Status: %s, Code: %d", resp.Status, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		err = fmt.Errorf("读取响应体失败: %w", err)
+		a.logger.Printf("[AliyunEmbedder] Error reading response body: %v", err)
 		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
 		return nil, err
 	}
+	// a.logger.Printf("[AliyunEmbedder] Response body: %s", string(body)) // 旧的直接打印方式
 
 	if resp.StatusCode != http.StatusOK {
 		var apiError AliyunOpenAIError
 		detailedError := fmt.Errorf("API调用失败, 状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		// 尝试从body中解析更详细的错误信息
 		if json.Unmarshal(body, &apiError) == nil && apiError.Message != "" {
 			detailedError = fmt.Errorf("API调用失败, 状态码: %d, 类型: %s, 错误: %s, Code: %s", resp.StatusCode, apiError.Type, apiError.Message, apiError.Code)
+		} else {
+			// 如果无法解析详细错误，或者解析出的错误信息为空，则也记录原始响应体
+			a.logger.Printf("[AliyunEmbedder] API call failed. Raw response body: %s", string(body))
 		}
 		// ctx = cbManager.OnError(ctx, runInfo, detailedError) // (Commented out)
+		a.logger.Printf("[AliyunEmbedder] API call failed: %v", detailedError)
 		return nil, detailedError
 	}
 
-	var embeddingResp AliyunOpenAIEmbeddingResponse
-	if err := json.Unmarshal(body, &embeddingResp); err != nil {
-		err = fmt.Errorf("解析OpenAI兼容响应失败: %w, 响应体: %s", err, string(body))
+	// 如果状态码是 OK，则解析响应并记录（带截断的向量）
+	var parsedResp AliyunOpenAIEmbeddingResponse
+	if err := json.Unmarshal(body, &parsedResp); err != nil {
+		err = fmt.Errorf("解析响应JSON失败: %w. Body: %s", err, string(body))
+		a.logger.Printf("[AliyunEmbedder] Error unmarshalling response JSON: %v", err)
 		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
 		return nil, err
 	}
 
-	if embeddingResp.Error != nil && embeddingResp.Error.Message != "" {
-		err = fmt.Errorf("嵌入API调用失败(响应内错误): 类型: %s, 错误: %s, Code: %s", embeddingResp.Error.Type, embeddingResp.Error.Message, embeddingResp.Error.Code)
+	// 记录解析后的响应，向量将被截断打印
+	logParsedResponseWithTruncatedEmbeddings(a.logger, &parsedResp)
+
+	// 检查响应中是否包含API级别的错误 (例如，输入文本过多)
+	if parsedResp.Error != nil && parsedResp.Error.Message != "" {
+		err = fmt.Errorf("API返回错误: 类型=%s, 消息='%s', Code=%s", parsedResp.Error.Type, parsedResp.Error.Message, parsedResp.Error.Code)
+		a.logger.Printf("[AliyunEmbedder] Parsed response contains API error: %v", err)
 		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
 		return nil, err
 	}
 
-	if len(embeddingResp.Data) == 0 && len(texts) > 0 {
-		err = fmt.Errorf("API响应不包含嵌入数据, 响应: %s", string(body))
-		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
-		return nil, err
-	}
-	if len(texts) > 0 && len(embeddingResp.Data) != len(texts) {
-		err = fmt.Errorf("mismatched embedding count: input %d, output %d. Body: %s", len(texts), len(embeddingResp.Data), string(body))
-		// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
-		return nil, err
+	// 从响应中提取嵌入向量
+	outputEmbeddings := make([][]float64, len(parsedResp.Data))
+	for i, dataEntry := range parsedResp.Data {
+		outputEmbeddings[i] = dataEntry.Embedding
 	}
 
-	outputEmbeddings := make([][]float64, len(texts))
-	for i := range texts {
-		if i < len(embeddingResp.Data) {
-			entry := embeddingResp.Data[i]
-			if entry.Index >= 0 && entry.Index < len(outputEmbeddings) {
-				outputEmbeddings[entry.Index] = entry.Embedding
-			} else {
-				err = fmt.Errorf("嵌入数据索引 %d 超出范围 %d", entry.Index, len(outputEmbeddings)-1)
-				// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
-				return nil, err
-			}
-		}
-	}
-
-	for i, emb := range outputEmbeddings {
-		if emb == nil && len(texts[i]) > 0 {
-			err = fmt.Errorf("missing embedding for text at index %d: \"%s\"", i, texts[i])
-			// ctx = cbManager.OnError(ctx, runInfo, err) // (Commented out)
-			return nil, err
-		}
-	}
-
-	// tokenUsage := &embedding.TokenUsage{ // (Commented out)
-	// 	PromptTokens:     embeddingResp.Usage.PromptTokens,
-	// 	TotalTokens:      embeddingResp.Usage.TotalTokens,
+	// 5. OnEnd callback (Commented out)
+	// tokenUsage := &embedding.TokenUsage{
+	// 	PromptTokens: int64(parsedResp.Usage.PromptTokens),
+	// 	TotalTokens:  int64(parsedResp.Usage.TotalTokens),
 	// }
-
-	// cbOutput := &embedding.CallbackOutput{ // (Commented out)
+	// cbOutput := &embedding.CallbackOutput{
 	// 	Embeddings: outputEmbeddings,
 	// 	Config:     &embedding.Config{Model: effectiveModel},
 	// 	TokenUsage: tokenUsage,
-	// 	Extra:      cbInput.Extra,
+	// 	Extra:      cbInput.Extra, // Preserve any extra data from input
 	// }
-
-	// ctx = cbManager.OnEnd(ctx, runInfo, cbOutput) // (Commented out)
+	// ctx = cbManager.OnEnd(ctx, runInfo, cbOutput)
+	a.logger.Printf("[AliyunEmbedder] Successfully embedded %d texts. First embedding dim (if any): %d. Prompt tokens: %d, Total tokens: %d",
+		len(texts), firstEmbeddingDim(outputEmbeddings), parsedResp.Usage.PromptTokens, parsedResp.Usage.TotalTokens)
 
 	return outputEmbeddings, nil
 }
+
+// Helper function to safely get the first text for logging
+func firstText(texts []string) string {
+	if len(texts) > 0 {
+		return texts[0]
+	}
+	return ""
+}
+
+// Helper function to safely get the dimension of the first embedding for logging
+func firstEmbeddingDim(embeddings [][]float64) int {
+	if len(embeddings) > 0 && len(embeddings[0]) > 0 {
+		return len(embeddings[0])
+	}
+	return 0
+}
+
+// logParsedResponseWithTruncatedEmbeddings 记录解析后的响应，并截断嵌入向量的打印
+func logParsedResponseWithTruncatedEmbeddings(logger *log.Logger, resp *AliyunOpenAIEmbeddingResponse) {
+	if resp == nil {
+		logger.Printf("[AliyunEmbedder] Parsed response is nil")
+		return
+	}
+
+	var embeddingsSummaries []string
+	for i, entry := range resp.Data {
+		summary := fmt.Sprintf("Entry %d: Index=%d, Object='%s', EmbeddingDim=%d",
+			i, entry.Index, entry.Object, len(entry.Embedding))
+		if len(entry.Embedding) > 0 {
+			summary += fmt.Sprintf(", EmbeddingValuePreview=%s", truncateEmbedding(entry.Embedding))
+		}
+		embeddingsSummaries = append(embeddingsSummaries, summary)
+	}
+
+	logger.Printf("[AliyunEmbedder] Parsed Response: Object='%s', Model='%s', ID='%s', Usage={PromptTokens:%d, TotalTokens:%d}, DataEntries=%d. Data: [%s]",
+		resp.Object, resp.Model, resp.ID, resp.Usage.PromptTokens, resp.Usage.TotalTokens, len(resp.Data), strings.Join(embeddingsSummaries, "; ")) // 使用 strings.Join
+
+	if resp.Error != nil {
+		logger.Printf("[AliyunEmbedder] Parsed Response Error: Message='%s', Type='%s', Param='%s', Code='%s'",
+			resp.Error.Message, resp.Error.Type, resp.Error.Param, resp.Error.Code)
+	}
+}
+
+// truncateEmbedding 截断嵌入向量的字符串表示形式
+func truncateEmbedding(vector []float64) string {
+	const maxLen = 6       // 如果向量长度大于此值，则截断
+	const showEachSide = 3 // 截断时每边显示多少元素
+
+	if len(vector) <= maxLen {
+		return fmt.Sprintf("%v", vector)
+	}
+
+	var truncated []string
+	for i := 0; i < showEachSide; i++ {
+		truncated = append(truncated, fmt.Sprintf("%.4f", vector[i]))
+	}
+	truncated = append(truncated, "...")
+	for i := len(vector) - showEachSide; i < len(vector); i++ {
+		truncated = append(truncated, fmt.Sprintf("%.4f", vector[i]))
+	}
+	return fmt.Sprintf("[%s]", strings.Join(truncated, ", "))
+}
+
+// GetCallbackHandler (Commented out)
+// func (a *AliyunEmbedder) GetCallbackHandler() callbacks.Handler {
+// return nil
+// }

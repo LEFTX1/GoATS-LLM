@@ -11,6 +11,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/gofrs/uuid/v5" // 导入uuid包
 )
 
 // VectorDatabase 向量数据库接口
@@ -204,97 +206,129 @@ func (q *Qdrant) createCollection(ctx context.Context) error {
 	return nil
 }
 
-// StoreResumeVectors 存储简历向量
-// 现在接受float64类型向量，与阿里云API兼容
+// StoreResumeVectors 存储简历向量到Qdrant
 func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks []types.ResumeChunk, embeddings [][]float64) ([]string, error) {
 	if len(chunks) != len(embeddings) {
-		return nil, fmt.Errorf("chunks和embeddings数量不匹配: %d vs %d", len(chunks), len(embeddings))
+		return nil, fmt.Errorf("块数量 (%d) 和嵌入数量 (%d) 不匹配", len(chunks), len(embeddings))
 	}
 
 	if len(chunks) == 0 {
-		return []string{}, nil // 没有数据要插入
+		log.Printf("StoreResumeVectors: resumeID %s 没有块需要存储", resumeID)
+		return []string{}, nil
 	}
 
-	// 构建Qdrant的点数据
-	points := make([]map[string]interface{}, len(chunks))
-	pointIDs := make([]string, len(chunks))
+	// Qdrant 点结构
+	type QdrantPoint struct {
+		ID      string                 `json:"id"` // Qdrant 要求 ID 是 UUID 或 uint64
+		Vector  []float64              `json:"vector"`
+		Payload map[string]interface{} `json:"payload"`
+	}
+
+	points := make([]QdrantPoint, 0, len(chunks))
+	storedPointIDs := make([]string, 0, len(chunks))
 
 	for i, chunk := range chunks {
-		// 为每个chunk生成一个唯一的ID
-		pointID := fmt.Sprintf("%s_chunk_%d", resumeID, chunk.ChunkID)
-		pointIDs[i] = pointID
+		if embeddings[i] == nil {
+			log.Printf("StoreResumeVectors: resumeID %s, chunk %d 的嵌入向量为nil，跳过存储", resumeID, chunk.ChunkID)
+			continue
+		}
 
-		// 构建payload
+		// 为每个点生成新的UUID作为其ID
+		pointUUID, err := uuid.NewV7()
+		if err != nil {
+			log.Printf("StoreResumeVectors: resumeID %s, chunk %d 生成UUID失败: %v, 跳过此点", resumeID, chunk.ChunkID, err)
+			return nil, fmt.Errorf("为点生成UUID失败: %w", err) // 或者选择跳过这个点并继续
+		}
+		pointID := pointUUID.String()
+
+		// 构建载荷 (Payload)
 		payload := map[string]interface{}{
-			"resume_id":        resumeID,
-			"chunk_id":         chunk.ChunkID,
-			"chunk_type":       chunk.ChunkType,
-			"content_preview":  truncateString(chunk.Content, 200),
-			"importance_score": chunk.ImportanceScore,
+			"resume_id":           resumeID,      // 关联回原始的简历提交UUID
+			"original_chunk_id":   chunk.ChunkID, // 来自LLM分块器的原始chunk_id
+			"chunk_type":          chunk.ChunkType,
+			"content_preview":     truncateString(chunk.Content, 200), // 内容预览
+			"importance_score":    chunk.ImportanceScore,
+			"name":                chunk.UniqueIdentifiers.Name,
+			"phone":               chunk.UniqueIdentifiers.Phone,
+			"email":               chunk.UniqueIdentifiers.Email,
+			"experience_years":    chunk.Metadata.ExperienceYears,
+			"education_level":     chunk.Metadata.EducationLevel,
+			"full_content_length": len(chunk.Content), // 存储完整内容的长度
+			// 可以添加更多来自 chunk.UniqueIdentifiers 和 chunk.Metadata 的字段
 		}
+		// 如果需要存储完整内容，可以取消注释下一行，但要注意Qdrant对payload大小的潜在限制
+		// payload["full_content"] = chunk.Content
 
-		// 添加元数据字段 (Metadata)
-		// 注意：如果 ExperienceYears 为 0，我们也希望存储它，以区分"经验为0"和"经验未知/未提供"
-		// 因此，不再使用 > 0 的判断，而是检查 basicInfo 中是否存在相关字段并已正确转换为 int
-		// 这里的 chunk.Metadata.ExperienceYears 已经是处理过的值
-		payload["experience_years"] = chunk.Metadata.ExperienceYears
-
-		if chunk.Metadata.EducationLevel != "" {
-			payload["education_level"] = chunk.Metadata.EducationLevel
-		}
-
-		// 添加扁平化的 UniqueIdentifiers
-		if chunk.UniqueIdentifiers.Name != "" {
-			payload["candidate_name"] = chunk.UniqueIdentifiers.Name
-		}
-		if chunk.UniqueIdentifiers.Phone != "" {
-			payload["candidate_phone"] = chunk.UniqueIdentifiers.Phone
-		}
-		if chunk.UniqueIdentifiers.Email != "" {
-			payload["candidate_email"] = chunk.UniqueIdentifiers.Email
-		}
-
-		// 创建点 - Qdrant API 接受 float64 或者 float32 (通常自动转换)
-		// 我们的 embeddings 是 [][]float64，保持不变
-		points[i] = map[string]interface{}{
-			"id":      pointID,
-			"vector":  embeddings[i],
-			"payload": payload,
-		}
+		points = append(points, QdrantPoint{
+			ID:      pointID,
+			Vector:  embeddings[i],
+			Payload: payload,
+		})
+		storedPointIDs = append(storedPointIDs, pointID)
 	}
 
-	// 准备upsert请求
-	requestBody := map[string]interface{}{
+	if len(points) == 0 {
+		log.Printf("StoreResumeVectors: resumeID %s 在过滤掉nil嵌入后没有有效的点需要存储", resumeID)
+		return []string{}, nil
+	}
+
+	// 准备批量upsert请求
+	upsertReqBody := map[string][]QdrantPoint{
 		"points": points,
 	}
-
-	jsonData, err := json.Marshal(requestBody)
+	jsonData, err := json.Marshal(upsertReqBody)
 	if err != nil {
-		return nil, fmt.Errorf("序列化upsert请求失败: %w", err)
+		return nil, fmt.Errorf("序列化Qdrant点请求失败: %w", err)
 	}
 
 	// 发送请求
-	url := fmt.Sprintf("%s/collections/%s/points?wait=true", q.endpoint, q.collectionName)
+	url := fmt.Sprintf("%s/collections/%s/points?wait=true", q.endpoint, q.collectionName) // wait=true 确保操作完成
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("创建upsert请求失败: %w", err)
+		return nil, fmt.Errorf("创建Qdrant点upsert请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := q.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("发送upsert请求失败: %w", err)
+		return nil, fmt.Errorf("发送Qdrant点upsert请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// 检查响应
+	respBody, _ := io.ReadAll(resp.Body) // 读取响应体以供调试
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("更新向量失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("Qdrant点upsert失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
 	}
 
-	log.Printf("成功存储 %d 个向量点到集合 %s", len(points), q.collectionName)
-	return pointIDs, nil
+	// 检查响应状态
+	var qdrantResp struct {
+		Result interface{} `json:"result"`
+		Status string      `json:"status"`
+		Time   float64     `json:"time"`
+		Error  string      `json:"error,omitempty"` // 早期版本的 Qdrant 可能在 result 中包含 error
+	}
+	if err := json.Unmarshal(respBody, &qdrantResp); err != nil {
+		log.Printf("StoreResumeVectors: 解析Qdrant upsert响应失败 for resumeID %s: %v. Body: %s", resumeID, err, string(respBody))
+		// 即使解析失败，如果状态码是200，也可能操作已成功，但最好记录下来
+	}
+
+	if qdrantResp.Status != "ok" && qdrantResp.Status != "acknowledged" && qdrantResp.Status != "completed" {
+		// "acknowledged" and "completed" are also valid success statuses for async operations or different versions.
+		// For wait=true, "ok" or "completed" is more common.
+		errMsg := fmt.Sprintf("Qdrant upsert 响应状态不是 'ok', 'acknowledged', or 'completed', 而是 '%s'", qdrantResp.Status)
+		if qdrantResp.Error != "" {
+			errMsg = fmt.Sprintf("%s. Qdrant Error: %s", errMsg, qdrantResp.Error)
+		} else if resultError, ok := qdrantResp.Result.(map[string]interface{}); ok && resultError["error"] != nil {
+			// 检查 result 字段中是否包含 error
+			errMsg = fmt.Sprintf("%s. Qdrant Result Error: %v", errMsg, resultError["error"])
+		}
+		log.Printf("StoreResumeVectors: %s for resumeID %s. Full Response: %s", errMsg, resumeID, string(respBody))
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	log.Printf("成功存储/更新 %d 个向量点到Qdrant for resumeID %s. Point IDs: %v", len(points), resumeID, storedPointIDs)
+	return storedPointIDs, nil
 }
 
 // SearchSimilarResumes 搜索相似简历

@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"ai-agent-go/internal/config"    // Import the main config package
@@ -11,10 +13,26 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const defaultTenantID = "default_tenant" // 临时的默认租户ID，后续应替换为实际逻辑
+
 // Redis wraps the Redis client
 type Redis struct {
 	Client *redis.Client
 	config *config.RedisConfig // Use config.RedisConfig
+}
+
+// FormatKey 是一个辅助函数，用于格式化包含租户ID和其他部分的Redis键。
+// tenantID: 当前操作的租户ID。
+// keyConstant: 来自 constants 包的键常量，其中包含 TenantPlaceholder。
+// parts: 附加到键的动态部分，例如具体的 job_id, md5 等。
+func (r *Redis) FormatKey(keyConstant string, parts ...string) string {
+	// 实际应用中，tenantID 可能来自 context 或 r.config (如果租户特定)
+	tenantID := defaultTenantID // 使用临时的默认值
+	base := strings.Replace(keyConstant, constants.TenantPlaceholder, tenantID, 1)
+	if len(parts) > 0 {
+		return base + strings.Join(parts, ":")
+	}
+	return base
 }
 
 // NewRedisAdapter creates a new Redis client connection (renamed from NewRedis)
@@ -94,12 +112,14 @@ func (r *Redis) GetMD5ExpireDuration() time.Duration {
 
 // AddRawFileMD5 添加原始文件MD5到集合并设置过期时间
 func (r *Redis) AddRawFileMD5(ctx context.Context, md5Hex string) error {
-	return r.addMD5WithExpirationInternal(ctx, constants.RawFileMD5SetKey, md5Hex)
+	key := r.FormatKey(constants.RawFileMD5SetKey)
+	return r.addMD5WithExpirationInternal(ctx, key, md5Hex)
 }
 
 // AddParsedTextMD5 添加解析后的文本MD5到集合并设置过期时间
 func (r *Redis) AddParsedTextMD5(ctx context.Context, md5Hex string) error {
-	return r.addMD5WithExpirationInternal(ctx, constants.ParsedTextMD5SetKey, md5Hex)
+	key := r.FormatKey(constants.ParsedTextMD5SetKey)
+	return r.addMD5WithExpirationInternal(ctx, key, md5Hex)
 }
 
 // addMD5WithExpirationInternal 内部辅助函数，用于添加MD5到指定集合并设置过期时间
@@ -109,19 +129,21 @@ func (r *Redis) addMD5WithExpirationInternal(ctx context.Context, setKey string,
 	}
 	pipe := r.Client.Pipeline()
 	pipe.SAdd(ctx, setKey, md5Hex)
-	pipe.ExpireNX(ctx, setKey, r.GetMD5ExpireDuration())
+	pipe.ExpireNX(ctx, setKey, r.GetMD5ExpireDuration()) // ExpireNX: Set expiry only if it does not already exist.
 	_, err := pipe.Exec(ctx)
 	return err
 }
 
 // CheckRawFileMD5Exists 检查原始文件MD5是否存在于Redis Set中。
 func (r *Redis) CheckRawFileMD5Exists(ctx context.Context, md5Hex string) (bool, error) {
-	return r.checkMD5ExistsInternal(ctx, constants.RawFileMD5SetKey, md5Hex)
+	key := r.FormatKey(constants.RawFileMD5SetKey)
+	return r.checkMD5ExistsInternal(ctx, key, md5Hex)
 }
 
 // CheckParsedTextMD5Exists 检查解析后的文本MD5是否存在于Redis Set中。
 func (r *Redis) CheckParsedTextMD5Exists(ctx context.Context, md5Hex string) (bool, error) {
-	return r.checkMD5ExistsInternal(ctx, constants.ParsedTextMD5SetKey, md5Hex)
+	key := r.FormatKey(constants.ParsedTextMD5SetKey)
+	return r.checkMD5ExistsInternal(ctx, key, md5Hex)
 }
 
 // checkMD5ExistsInternal 内部辅助函数，用于检查MD5是否存在于指定集合
@@ -134,6 +156,9 @@ func (r *Redis) checkMD5ExistsInternal(ctx context.Context, setKey string, md5He
 
 // Deprecated: AddMD5WithExpiration 添加MD5到集合并设置过期时间. 请使用 AddRawFileMD5 或 AddParsedTextMD5 代替。
 func (r *Redis) AddMD5WithExpiration(ctx context.Context, key string, md5 string) error {
+	// This method is deprecated. The 'key' parameter here was the full key including tenant.
+	// New methods FormatKey internally. For direct full key usage, it's better to use client directly
+	// or ensure key formation is consistent.
 	pipe := r.Client.Pipeline()
 
 	// 添加MD5到Set
@@ -148,8 +173,78 @@ func (r *Redis) AddMD5WithExpiration(ctx context.Context, key string, md5 string
 
 // Deprecated: CheckMD5Exists 检查给定的 MD5 是否存在于指定的 Redis Set 中。请使用 CheckRawFileMD5Exists 或 CheckParsedTextMD5Exists 代替。
 func (r *Redis) CheckMD5Exists(ctx context.Context, setKey string, md5Hex string) (bool, error) {
+	// This method is deprecated. Similar to AddMD5WithExpiration.
 	if r.Client == nil {
 		return false, fmt.Errorf("Redis client is not initialized")
 	}
 	return r.Client.SIsMember(ctx, setKey, md5Hex).Result()
+}
+
+// SetJobVector 缓存JD向量
+// vector: float64 类型的向量，将进行JSON序列化存储
+// modelVersion: 生成该向量的嵌入模型版本
+func (r *Redis) SetJobVector(ctx context.Context, jobID string, vector []float64, modelVersion string) error {
+	if r.Client == nil {
+		return fmt.Errorf("Redis client is not initialized")
+	}
+	key := r.FormatKey(constants.JobVectorCachePrefix, jobID)
+
+	// 将向量和模型版本一起存储，例如在一个JSON对象中
+	cachedData := map[string]interface{}{
+		"vector":        vector,
+		"model_version": modelVersion,
+	}
+	jsonData, err := json.Marshal(cachedData)
+	if err != nil {
+		return fmt.Errorf("序列化JD向量缓存数据失败: %w", err)
+	}
+
+	return r.Client.Set(ctx, key, jsonData, constants.JDCacheDuration).Err() // 使用常量中定义的过期时间
+}
+
+// GetJobVector 从缓存获取JD向量和模型版本
+func (r *Redis) GetJobVector(ctx context.Context, jobID string) ([]float64, string, error) {
+	if r.Client == nil {
+		return nil, "", fmt.Errorf("Redis client is not initialized")
+	}
+	key := r.FormatKey(constants.JobVectorCachePrefix, jobID)
+
+	val, err := r.Client.Get(ctx, key).Result()
+	if err != nil {
+		return nil, "", err // 包括 redis.Nil 错误
+	}
+
+	var cachedData struct {
+		Vector       []float64 `json:"vector"`
+		ModelVersion string    `json:"model_version"`
+	}
+
+	if err := json.Unmarshal([]byte(val), &cachedData); err != nil {
+		return nil, "", fmt.Errorf("反序列化JD向量缓存数据失败: %w", err)
+	}
+
+	return cachedData.Vector, cachedData.ModelVersion, nil
+}
+
+// SetJobKeywords 缓存JD关键词
+// keywordsJSON: 已经是JSON字符串的关键词列表
+func (r *Redis) SetJobKeywords(ctx context.Context, jobID string, keywordsJSON string) error {
+	if r.Client == nil {
+		return fmt.Errorf("Redis client is not initialized")
+	}
+	key := r.FormatKey(constants.JobKeywordsCachePrefix, jobID)
+	return r.Client.Set(ctx, key, keywordsJSON, constants.JDCacheDuration).Err()
+}
+
+// GetJobKeywords 从缓存获取JD关键词 (JSON字符串形式)
+func (r *Redis) GetJobKeywords(ctx context.Context, jobID string) (string, error) {
+	if r.Client == nil {
+		return "", fmt.Errorf("Redis client is not initialized")
+	}
+	key := r.FormatKey(constants.JobKeywordsCachePrefix, jobID)
+	val, err := r.Client.Get(ctx, key).Result()
+	if err != nil {
+		return "", err // 包括 redis.Nil 错误
+	}
+	return val, nil
 }
