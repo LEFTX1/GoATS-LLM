@@ -279,3 +279,43 @@ func (m *MySQL) CreateJobVector(tx *gorm.DB, jobVector *models.JobVector) error 
 func (m *MySQL) UpdateJobVector(tx *gorm.DB, jobVector *models.JobVector) error {
 	return tx.Save(jobVector).Error // Save 会基于主键更新或创建
 }
+
+// UpdateResumeChunkPointIDs 批量更新 ResumeSubmissionChunk 记录的 PointID
+func (m *MySQL) UpdateResumeChunkPointIDs(ctx context.Context, submissionUUID string, chunkDBIDs []uint64, pointIDs []string) error {
+	if len(chunkDBIDs) != len(pointIDs) {
+		return fmt.Errorf("chunkDBIDs 和 pointIDs 长度不匹配: %d != %d", len(chunkDBIDs), len(pointIDs))
+	}
+	if len(chunkDBIDs) == 0 {
+		return nil // 没有需要更新的记录
+	}
+
+	tx := m.DB().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return fmt.Errorf("开始事务失败: %w", tx.Error)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			// 可以选择记录 panic
+		}
+	}()
+
+	for i, chunkDBID := range chunkDBIDs {
+		pointID := pointIDs[i]
+		result := tx.Model(&models.ResumeSubmissionChunk{}).Where("chunk_db_id = ? AND submission_uuid = ?", chunkDBID, submissionUUID).Update("point_id", &pointID) // 使用 &pointID 确保可以更新为 NULL（如果 pointID 是空字符串，则更新为 NULL，如果pointID是指针，则传递指针）
+		if result.Error != nil {
+			tx.Rollback()
+			return fmt.Errorf("更新 chunk_db_id %d 的 point_id 失败: %w", chunkDBID, result.Error)
+		}
+		if result.RowsAffected == 0 {
+			// 可以选择性地处理未找到记录的情况，例如记录日志或返回错误
+			// logger.Ctx(ctx).Warn().Uint64("chunkDBID", chunkDBID).Str("submissionUUID", submissionUUID).Msg("UpdateResumeChunkPointIDs: 未找到要更新的记录或point_id未改变")
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("提交事务失败: %w", err)
+	}
+
+	return nil
+}

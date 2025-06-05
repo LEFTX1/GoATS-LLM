@@ -93,6 +93,7 @@ type ResumeSubmissionChunk struct {
 	ChunkType           string    `gorm:"type:varchar(50);not null;index:idx_rsc_chunk_type"`
 	ChunkTitle          string    `gorm:"type:text"`
 	ChunkContentText    string    `gorm:"type:text;not null"`
+	PointID             *string   `gorm:"type:varchar(255);index:idx_rsc_point_id"` // 新增: Qdrant中的Point ID,varchar(255)应该足够
 	CreatedAt           time.Time `gorm:"type:datetime(6);default:CURRENT_TIMESTAMP(6)"`
 
 	ResumeSubmission *ResumeSubmission `gorm:"foreignKey:SubmissionUUID;references:SubmissionUUID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`

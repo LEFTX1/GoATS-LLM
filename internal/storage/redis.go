@@ -248,3 +248,61 @@ func (r *Redis) GetJobKeywords(ctx context.Context, jobID string) (string, error
 	}
 	return val, nil
 }
+
+// CheckAndAddRawFileMD5 使用Lua脚本原子地检查MD5是否存在并添加（如不存在）
+// 返回值: exists - 如果MD5已存在则为true，error - 操作错误
+func (r *Redis) CheckAndAddRawFileMD5(ctx context.Context, md5Hex string) (exists bool, err error) {
+	script := redis.NewScript(`
+	local exists = redis.call('SISMEMBER', KEYS[1], ARGV[1])
+	if exists == 0 then
+		redis.call('SADD', KEYS[1], ARGV[1])
+		-- 设置过期时间（如果配置了且key没有过期时间）
+		local ttl = redis.call('TTL', KEYS[1])
+		if ttl < 0 then
+			redis.call('EXPIRE', KEYS[1], ARGV[2])
+		end
+		return 0
+	else
+		return 1
+	end
+	`)
+
+	expireSeconds := int(r.GetMD5ExpireDuration().Seconds())
+	setKey := r.FormatKey(constants.RawFileMD5SetKey)
+
+	result, err := script.Run(ctx, r.Client, []string{setKey}, md5Hex, expireSeconds).Int()
+	if err != nil {
+		return false, fmt.Errorf("执行Redis Lua脚本失败: %w", err)
+	}
+
+	return result == 1, nil // 1表示已存在，0表示新添加
+}
+
+// CheckAndAddParsedTextMD5 使用Lua脚本原子地检查解析文本MD5是否存在并添加（如不存在）
+// 返回值: exists - 如果MD5已存在则为true，error - 操作错误
+func (r *Redis) CheckAndAddParsedTextMD5(ctx context.Context, md5Hex string) (exists bool, err error) {
+	script := redis.NewScript(`
+	local exists = redis.call('SISMEMBER', KEYS[1], ARGV[1])
+	if exists == 0 then
+		redis.call('SADD', KEYS[1], ARGV[1])
+		-- 设置过期时间（如果配置了且key没有过期时间）
+		local ttl = redis.call('TTL', KEYS[1])
+		if ttl < 0 then
+			redis.call('EXPIRE', KEYS[1], ARGV[2])
+		end
+		return 0
+	else
+		return 1
+	end
+	`)
+
+	expireSeconds := int(r.GetMD5ExpireDuration().Seconds())
+	setKey := r.FormatKey(constants.ParsedTextMD5SetKey)
+
+	result, err := script.Run(ctx, r.Client, []string{setKey}, md5Hex, expireSeconds).Int()
+	if err != nil {
+		return false, fmt.Errorf("执行Redis Lua脚本失败: %w", err)
+	}
+
+	return result == 1, nil // 1表示已存在，0表示新添加
+}

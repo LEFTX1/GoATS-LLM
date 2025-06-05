@@ -8,11 +8,9 @@ import (
 	storage2 "ai-agent-go/internal/storage"
 	"ai-agent-go/internal/storage/models"
 	"ai-agent-go/pkg/utils"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -74,50 +72,10 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	}
 	defer file.Close()
 
-	// 0. 读取文件内容并计算文件本身的MD5 (需要在上传MinIO前，且reader只能读一次)
-	fileBytes, err := io.ReadAll(file) // Changed 'reader' to 'file'
-	if err != nil {
-		logger.Error().Err(err).Msg("读取上传文件内容失败")
-		// return nil, fmt.Errorf("读取上传文件内容失败: %w", err)
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "读取上传文件内容失败"})
-		return
-	}
-	fileMD5Hex := utils.CalculateMD5(fileBytes)
-
-	// 检查文件MD5是否已存在于Redis Set
-	exists, err := h.storage.Redis.CheckRawFileMD5Exists(c, fileMD5Hex) // Changed 'ctx' to 'c'
-	if err != nil {
-		// 如果Redis查询失败，根据策略决定是继续还是报错。这里选择报错，因为去重是重要逻辑。
-		logger.Error().
-			Err(err).
-			Str("md5", fileMD5Hex).
-			Msg("查询Redis文件MD5 Set失败")
-		// return nil, fmt.Errorf("检查文件MD5重复性时Redis查询失败: %w", err)
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "检查文件MD5重复性时Redis查询失败"})
-		return
-	}
-
-	if exists {
-		logger.Info().
-			Str("md5", fileMD5Hex).
-			Str("filename", fileHeader.Filename).
-			Msg("检测到重复的文件MD5，跳过处理")
-		// return &ResumeUploadResponse{
-		// 	SubmissionUUID: "", // 或者可以考虑生成一个UUID并记录为DUPLICATE_FILE状态，但不触发后续
-		// 	Status:         "DUPLICATE_FILE_SKIPPED",
-		// }, nil
-		ctx.JSON(http.StatusOK, ResumeUploadResponse{
-			SubmissionUUID: "",
-			Status:         constants.StatusDuplicateFileSkipped,
-		})
-		return
-	}
-
 	// 1. 生成UUIDv7
 	uuidV7, err := uuid.NewV7()
 	if err != nil {
 		logger.Error().Err(err).Msg("生成UUIDv7失败")
-		// return nil, fmt.Errorf("生成UUIDv7失败: %w", err)
 		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "生成UUID失败"})
 		return
 	}
@@ -129,26 +87,39 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 		ext = ".pdf" // 默认为PDF
 	}
 
-	// 3. 上传原始文件到MinIO
-	// 因为 fileBytes 已经被读取，需要用 bytes.NewReader 重新包装
-	originalObjectKey, err := h.storage.MinIO.UploadResumeFile(c, submissionUUID, ext, bytes.NewReader(fileBytes), int64(len(fileBytes))) // Changed 'ctx' to 'c'
+	// 3. 流式上传文件到MinIO并同时计算MD5
+	originalObjectKey, fileMD5Hex, err := h.storage.MinIO.UploadResumeFileStreaming(c, submissionUUID, ext, file, fileHeader.Size)
 	if err != nil {
-		logger.Error().Err(err).Str("submission_uuid", submissionUUID).Msg("上传简历到MinIO失败")
-		// return nil, fmt.Errorf("上传简历到MinIO失败: %w", err)
+		logger.Error().Err(err).Str("submission_uuid", submissionUUID).Msg("流式上传简历到MinIO失败")
 		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "上传简历到MinIO失败"})
 		return
 	}
 
-	// 在MinIO上传成功后，将新的文件MD5添加到Redis Set，并设置过期时间
-	if err := h.storage.Redis.AddRawFileMD5(c, fileMD5Hex); err != nil { // Changed 'ctx' to 'c'
-		logger.Warn().
+	// 4. 使用原子操作检查并添加文件MD5
+	exists, err := h.storage.Redis.CheckAndAddRawFileMD5(c, fileMD5Hex)
+	if err != nil {
+		logger.Error().
 			Err(err).
 			Str("md5", fileMD5Hex).
-			Str("object_key", originalObjectKey).
-			Msg("添加文件MD5到Redis Set失败，文件已上传到MinIO")
+			Msg("检查并添加文件MD5失败")
+		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "检查文件MD5重复性时Redis操作失败"})
+		return
 	}
 
-	// 4. 构建消息并发送到RabbitMQ
+	if exists {
+		logger.Info().
+			Str("md5", fileMD5Hex).
+			Str("filename", fileHeader.Filename).
+			Msg("检测到重复的文件MD5，跳过处理")
+		// 返回409 Conflict（语义上更正确）而不是200 OK
+		ctx.JSON(http.StatusConflict, ResumeUploadResponse{
+			SubmissionUUID: "",
+			Status:         constants.StatusDuplicateFileSkipped,
+		})
+		return
+	}
+
+	// 5. 构建消息并发送到RabbitMQ
 	message := storage2.ResumeUploadMessage{
 		SubmissionUUID:      submissionUUID,
 		OriginalFilePathOSS: originalObjectKey,
@@ -171,16 +142,11 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	)
 	if err != nil {
 		logger.Error().Err(err).Str("submission_uuid", submissionUUID).Msg("发布消息到RabbitMQ失败")
-		// return nil, fmt.Errorf("发布消息到RabbitMQ失败: %w", err)
 		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "发布消息到RabbitMQ失败"})
 		return
 	}
 
-	// 5. 返回响应
-	// return &ResumeUploadResponse{
-	// 	SubmissionUUID: submissionUUID,
-	// 	Status:         "SUBMITTED_FOR_PROCESSING",
-	// }, nil
+	// 6. 返回响应
 	ctx.JSON(http.StatusOK, ResumeUploadResponse{
 		SubmissionUUID: submissionUUID,
 		Status:         constants.StatusSubmittedForProcessing,

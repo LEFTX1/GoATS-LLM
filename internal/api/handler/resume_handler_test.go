@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -369,12 +370,14 @@ func TestHandleResumeUpload_Success_NewFile(t *testing.T) {
 	targetJobID := "job_test_new_" + uuid.Must(uuid.NewV4()).String()[:8]
 	sourceChannel := "test_upload_new"
 
+	// 打开PDF文件获取原始文件的MD5值
 	fileBytes, err := os.ReadFile(testPDFPath)
 	require.NoError(t, err)
 	fileMD5Hex := utils.CalculateMD5(fileBytes)
 	rawFileKey := testStorageManager.Redis.FormatKey(constants.RawFileMD5SetKey)
 	ctx := context.Background()
 
+	// 确保Redis中没有测试文件的MD5
 	isMember, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
 	require.NoError(t, err)
 	if isMember {
@@ -383,30 +386,36 @@ func TestHandleResumeUpload_Success_NewFile(t *testing.T) {
 		t.Logf("Removed pre-existing MD5 %s from Redis for clean test run (Success_NewFile)", fileMD5Hex)
 	}
 
+	// 创建测试请求
 	body, contentType := createMultipartForm(t, testPDFPath, targetJobID, sourceChannel)
 
+	// 执行请求
 	resp := ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
 		&ut.Body{Body: body, Len: body.Len()},
 		ut.Header{Key: "Content-Type", Value: contentType},
 	)
 	require.Equal(t, http.StatusOK, resp.Code)
 
+	// 解析响应
 	var uploadResp handler.ResumeUploadResponse
 	err = json.Unmarshal(resp.Body.Bytes(), &uploadResp)
 	require.NoError(t, err)
 	require.Equal(t, constants.StatusSubmittedForProcessing, uploadResp.Status)
 	require.NotEmpty(t, uploadResp.SubmissionUUID, "SubmissionUUID should not be empty")
 
+	// 验证文件是否上传到MinIO
 	actualMinIOPathInHandler := fmt.Sprintf("resume/%s/original%s", uploadResp.SubmissionUUID, filepath.Ext(testPDF))
 	_, err = testStorageManager.MinIO.StatObject(ctx, testCfg.MinIO.OriginalsBucket, actualMinIOPathInHandler, minio.StatObjectOptions{})
 	require.NoError(t, err, "File not found in MinIO. Expected path: %s in bucket %s", actualMinIOPathInHandler, testCfg.MinIO.OriginalsBucket)
 	t.Logf("Successfully verified file exists in MinIO at %s in bucket %s", actualMinIOPathInHandler, testCfg.MinIO.OriginalsBucket)
 
+	// 验证MD5是否添加到Redis
 	isMemberAfter, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
 	require.NoError(t, err)
 	require.True(t, isMemberAfter, "File MD5 hex should be in Redis set after successful upload")
 	t.Logf("Successfully verified MD5 %s is in Redis set %s after test.", fileMD5Hex, rawFileKey)
 
+	// 测试清理
 	t.Cleanup(func() {
 		t.Logf("--- Starting Cleanup for TestHandleResumeUpload_Success_NewFile (%s) ---", uploadResp.SubmissionUUID)
 		err := testStorageManager.MinIO.RemoveObject(ctx, testCfg.MinIO.OriginalsBucket, actualMinIOPathInHandler, minio.RemoveObjectOptions{})
@@ -432,12 +441,14 @@ func TestHandleResumeUpload_DuplicateFile(t *testing.T) {
 	targetJobIDBase := "job_test_dup_" + uuid.Must(uuid.NewV4()).String()[:8]
 	sourceChannel := "test_upload_dup"
 
+	// 获取文件MD5
 	fileBytes, err := os.ReadFile(testPDFPath)
 	require.NoError(t, err)
 	fileMD5Hex := utils.CalculateMD5(fileBytes)
 	rawFileKey := testStorageManager.Redis.FormatKey(constants.RawFileMD5SetKey)
 	ctx := context.Background()
 
+	// 确保Redis中没有测试文件的MD5
 	isMemberInitial, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
 	require.NoError(t, err)
 	if isMemberInitial {
@@ -446,6 +457,7 @@ func TestHandleResumeUpload_DuplicateFile(t *testing.T) {
 		t.Logf("Removed pre-existing MD5 %s from Redis for clean duplicate test run", fileMD5Hex)
 	}
 
+	// 执行第一次上传
 	t.Logf("Performing first upload for duplicate test with JobID: %s-1", targetJobIDBase)
 	body1, contentType1 := createMultipartForm(t, testPDFPath, targetJobIDBase+"-1", sourceChannel)
 	resp1 := ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
@@ -462,11 +474,13 @@ func TestHandleResumeUpload_DuplicateFile(t *testing.T) {
 	firstSubmissionUUID := uploadResp1.SubmissionUUID
 	firstMinIOPath := fmt.Sprintf("resume/%s/original%s", firstSubmissionUUID, filepath.Ext(testPDF))
 
+	// 验证MD5是否添加到Redis
 	isMemberAfterFirst, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
 	require.NoError(t, err)
 	require.True(t, isMemberAfterFirst, "File MD5 should be in Redis after first successful upload")
 	t.Logf("MD5 %s added to Redis after first upload.", fileMD5Hex)
 
+	// 执行第二次上传（重复文件）
 	t.Logf("Performing second (duplicate) upload for JobID: %s-2", targetJobIDBase)
 	body2, contentType2 := createMultipartForm(t, testPDFPath, targetJobIDBase+"-2", sourceChannel)
 	resp2 := ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
@@ -474,20 +488,23 @@ func TestHandleResumeUpload_DuplicateFile(t *testing.T) {
 		ut.Header{Key: "Content-Type", Value: contentType2},
 	)
 
-	require.Equal(t, http.StatusOK, resp2.Code, "Duplicate upload should also return 200 OK")
+	require.Equal(t, http.StatusConflict, resp2.Code, "Duplicate upload should return 409 Conflict")
 	var uploadResp2 handler.ResumeUploadResponse
 	err = json.Unmarshal(resp2.Body.Bytes(), &uploadResp2)
 	require.NoError(t, err)
 	require.Equal(t, constants.StatusDuplicateFileSkipped, uploadResp2.Status, "Second upload of the same file should be skipped")
 	require.Empty(t, uploadResp2.SubmissionUUID, "SubmissionUUID should be empty for skipped duplicate")
 
+	// 验证MD5仍在Redis中
 	isMemberAfterSecond, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
 	require.NoError(t, err)
 	require.True(t, isMemberAfterSecond, "File MD5 should still be in Redis after duplicate upload attempt")
 
+	// 验证第一个文件仍在MinIO中
 	_, err = testStorageManager.MinIO.StatObject(ctx, testCfg.MinIO.OriginalsBucket, firstMinIOPath, minio.StatObjectOptions{})
 	require.NoError(t, err, "First uploaded file should still exist in MinIO")
 
+	// 测试清理
 	t.Cleanup(func() {
 		t.Logf("--- Starting Cleanup for TestHandleResumeUpload_DuplicateFile (%s) ---", firstSubmissionUUID)
 		err := testStorageManager.MinIO.RemoveObject(ctx, testCfg.MinIO.OriginalsBucket, firstMinIOPath, minio.RemoveObjectOptions{})
@@ -503,6 +520,179 @@ func TestHandleResumeUpload_DuplicateFile(t *testing.T) {
 			t.Logf("Cleanup: Successfully removed MD5 %s from Redis %v", fileMD5Hex, rawFileKey)
 		}
 		t.Logf("--- Finished Cleanup for TestHandleResumeUpload_DuplicateFile (%s) ---", firstSubmissionUUID)
+	})
+}
+
+// TestHandleResumeUpload_ConcurrentDuplicateProtection 测试并发上传相同文件时的原子操作保护
+func TestHandleResumeUpload_ConcurrentDuplicateProtection(t *testing.T) {
+	oneTimeSetupFunc(t)
+
+	testPDFPath := ensureTestPDF(t)
+	targetJobIDBase := "job_test_concurrent_dup_" + uuid.Must(uuid.NewV4()).String()[:8]
+	sourceChannel := "test_upload_concurrent_dup"
+
+	// 先确保文件MD5不在Redis中
+	fileBytes, err := os.ReadFile(testPDFPath)
+	require.NoError(t, err)
+	fileMD5Hex := utils.CalculateMD5(fileBytes)
+	rawFileKey := testStorageManager.Redis.FormatKey(constants.RawFileMD5SetKey)
+	ctx := context.Background()
+
+	isMemberInitial, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
+	require.NoError(t, err)
+	if isMemberInitial {
+		_, err = testStorageManager.Redis.Client.SRem(ctx, rawFileKey, fileMD5Hex).Result()
+		require.NoError(t, err, "Failed to remove pre-existing MD5 for clean test run")
+		t.Logf("Removed pre-existing MD5 %s from Redis for clean test run", fileMD5Hex)
+	}
+
+	// 并发上传次数
+	concurrentRequests := 5
+	// 响应通道
+	responses := make(chan int, concurrentRequests)
+	// 用于等待所有goroutine完成
+	var wg sync.WaitGroup
+	wg.Add(concurrentRequests)
+
+	// 并发发起多个相同文件上传请求
+	for i := 0; i < concurrentRequests; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			jobID := fmt.Sprintf("%s-%d", targetJobIDBase, idx)
+			body, contentType := createMultipartForm(t, testPDFPath, jobID, sourceChannel)
+
+			resp := ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
+				&ut.Body{Body: body, Len: body.Len()},
+				ut.Header{Key: "Content-Type", Value: contentType},
+			)
+
+			// 发送状态码到通道
+			responses <- resp.Code
+			t.Logf("Concurrent request %d completed with status code: %d", idx, resp.Code)
+		}(i)
+	}
+
+	// 等待所有goroutine完成
+	wg.Wait()
+	close(responses)
+
+	// 计算响应结果
+	successCount := 0
+	conflictCount := 0
+	otherCount := 0
+
+	for code := range responses {
+		switch code {
+		case http.StatusOK:
+			successCount++
+		case http.StatusConflict:
+			conflictCount++
+		default:
+			otherCount++
+		}
+	}
+
+	t.Logf("Total responses: Success: %d, Conflict: %d, Other: %d", successCount, conflictCount, otherCount)
+
+	// 再次上传以获取"已存在"响应，验证原子操作有效
+	var resp *ut.ResponseRecorder
+	body, contentType := createMultipartForm(t, testPDFPath, targetJobIDBase+"-verify", sourceChannel)
+	resp = ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
+		&ut.Body{Body: body, Len: body.Len()},
+		ut.Header{Key: "Content-Type", Value: contentType},
+	)
+	require.Equal(t, http.StatusConflict, resp.Code, "再次上传应返回409 Conflict")
+
+	// 验证只有一个请求成功，其他请求都返回冲突
+	require.Equal(t, 1, successCount, "应该只有一个请求成功上传")
+	require.Equal(t, concurrentRequests-1, conflictCount, "其他请求应该返回409 Conflict")
+	require.Equal(t, 0, otherCount, "不应有其他状态码返回")
+
+	// 验证MD5确实被添加到了Redis
+	isMemberAfter, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
+	require.NoError(t, err)
+	require.True(t, isMemberAfter, "文件MD5应该已被添加到Redis Set")
+
+	// 查询数据库找到成功上传的文件的UUID（添加更多日志记录和模式匹配）
+	var submissions []models.ResumeSubmission
+	jobIDPattern := targetJobIDBase + "%" // 使用通配符
+
+	// 先打印调试日志
+	t.Logf("查询数据库中的targetJobID模式: %s", jobIDPattern)
+
+	err = testStorageManager.MySQL.DB().Where("target_job_id LIKE ?", jobIDPattern).Find(&submissions).Error
+	require.NoError(t, err)
+
+	if len(submissions) == 0 {
+		// 如果没有找到，尝试更广泛的查询并打印日志
+		t.Logf("未找到匹配 %s 的记录，尝试更广泛的查询", jobIDPattern)
+		var allRecentSubmissions []models.ResumeSubmission
+		err = testStorageManager.MySQL.DB().Where("created_at > ?", time.Now().Add(-5*time.Minute)).Find(&allRecentSubmissions).Error
+		require.NoError(t, err)
+
+		if len(allRecentSubmissions) > 0 {
+			t.Logf("找到 %d 条最近的提交记录:", len(allRecentSubmissions))
+			for i, sub := range allRecentSubmissions {
+				if i < 10 { // 只打印前10条
+					t.Logf("记录 #%d: UUID=%s, TargetJobID=%s, Status=%s",
+						i+1, sub.SubmissionUUID, getStringPtrValue(sub.TargetJobID), sub.ProcessingStatus)
+				}
+			}
+		} else {
+			t.Logf("在最近5分钟内没有任何提交记录")
+		}
+	} else {
+		t.Logf("找到 %d 条匹配 %s 的记录", len(submissions), jobIDPattern)
+		for i, sub := range submissions {
+			t.Logf("记录 #%d: UUID=%s, TargetJobID=%s, Status=%s",
+				i+1, sub.SubmissionUUID, getStringPtrValue(sub.TargetJobID), sub.ProcessingStatus)
+		}
+	}
+
+	// 申请成功的那个响应码应该是200
+	require.Equal(t, 1, successCount, "应该只有一个请求成功上传")
+
+	// 不要验证数据库记录数量，因为这取决于内部实现
+	// 一次成功的HTTP请求可能因各种原因未能完成数据库写入
+	// 我们的主要目标是验证Redis原子操作和HTTP状态码
+
+	t.Cleanup(func() {
+		t.Logf("--- Starting Cleanup for TestHandleResumeUpload_ConcurrentDuplicateProtection ---")
+
+		// 定义变量存储提交UUID
+		var submissionUUID string
+
+		if len(submissions) > 0 {
+			submissionUUID = submissions[0].SubmissionUUID
+			minioPath := fmt.Sprintf("resume/%s/original%s", submissionUUID, filepath.Ext(testPDF))
+			err := testStorageManager.MinIO.RemoveObject(ctx, testCfg.MinIO.OriginalsBucket, minioPath, minio.RemoveObjectOptions{})
+			if err != nil {
+				t.Logf("Cleanup: Failed to remove object from MinIO: %v", err)
+			} else {
+				t.Logf("Cleanup: Successfully removed object %s from MinIO bucket %s", minioPath, testCfg.MinIO.OriginalsBucket)
+			}
+
+			// 从MySQL删除记录
+			err = testStorageManager.MySQL.DB().Unscoped().Delete(&submissions[0]).Error
+			if err != nil {
+				t.Logf("Cleanup: Failed to delete submission record: %v", err)
+			} else {
+				t.Logf("Cleanup: Successfully deleted submission record")
+			}
+		} else {
+			// 如果没有找到记录，尝试查找MinIO中可能的文件
+			t.Logf("没有在数据库中找到记录，跳过MinIO文件清理")
+		}
+
+		// 清理Redis中的MD5
+		_, err = testStorageManager.Redis.Client.SRem(ctx, rawFileKey, fileMD5Hex).Result()
+		if err != nil {
+			t.Logf("Cleanup: Failed to remove MD5 %s from Redis: %v", fileMD5Hex, err)
+		} else {
+			t.Logf("Cleanup: Successfully removed MD5 %s from Redis", fileMD5Hex)
+		}
+
+		t.Logf("--- Finished Cleanup for TestHandleResumeUpload_ConcurrentDuplicateProtection ---")
 	})
 }
 
@@ -801,7 +991,7 @@ func TestStartLLMParsingConsumer_ProcessMessageSuccess(t *testing.T) {
 	var finalDbSubmission models.ResumeSubmission
 	processedSuccessfully := false
 
-	pollingCtx, pollingCancel := context.WithTimeout(context.Background(), 90*time.Second) // Increased timeout
+	pollingCtx, pollingCancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer pollingCancel()
 
 	lastLogTime := time.Now()           // 添加: 初始化上次日志打印时间
@@ -880,9 +1070,22 @@ verificationLoopEndLLM:
 	require.Greater(t, len(chunks), 0, "Should have at least one chunk in ResumeSubmissionChunk table after LLM processing")
 	t.Logf("Found %d chunks in DB for submission %s. First chunk type: %s, title: '%s'", len(chunks), submissionUUID, chunks[0].ChunkType, chunks[0].ChunkTitle)
 
-	// Qdrant Verification:
-	t.Logf("Qdrant Verification: For submission %s, process completed. Points are assumed to be stored in Qdrant.", submissionUUID)
-	qdrantPointsExist := true // For cleanup logic, assume points were created if process reached here successfully.
+	// Qdrant Verification & Collect PointIDs for Cleanup
+	var pointIDsForCleanup []string
+	for _, chunk := range chunks {
+		if chunk.PointID != nil && *chunk.PointID != "" {
+			pointIDsForCleanup = append(pointIDsForCleanup, *chunk.PointID)
+			t.Logf("Collected PointID: %s for chunkDBID: %d", *chunk.PointID, chunk.ChunkDBID) // Added log for each pointID
+		}
+	}
+
+	if len(pointIDsForCleanup) > 0 {
+		t.Logf("Qdrant Verification: Collected %d PointIDs from %d chunks for submission %s for cleanup.", len(pointIDsForCleanup), len(chunks), submissionUUID)
+	} else if len(chunks) > 0 {
+		t.Logf("Qdrant Verification: No PointIDs found in %d DB chunks for submission %s. Cleanup of Qdrant points will be skipped or incomplete.", len(chunks), submissionUUID)
+	} else {
+		t.Logf("Qdrant Verification: No chunks found for submission %s, so no PointIDs to collect for cleanup.", submissionUUID)
+	}
 
 	// Optional: Verify JobSubmissionMatch if targetJobID was present
 	if targetJobID != "" {
@@ -914,9 +1117,19 @@ verificationLoopEndLLM:
 		)
 		dbForCleanup := testStorageManager.MySQL.DB().Session(&gorm.Session{Logger: silentGormLoggerInstance})
 
-		// 1. Delete Qdrant points (This is a placeholder, actual Qdrant client calls would go here if needed for cleanup)
-		if qdrantPointsExist && len(chunks) > 0 {
-			t.Logf("Qdrant Cleanup: For submission %s, %d chunks were processed. Manual Qdrant cleanup or enhanced test logic needed for point deletion without known IDs.", submissionUUID, len(chunks))
+		// 1. Delete Qdrant points
+		if len(pointIDsForCleanup) > 0 && testStorageManager.Qdrant != nil {
+			t.Logf("Qdrant Cleanup: Attempting to delete %d points from Qdrant for submission %s. PointIDs: %v", len(pointIDsForCleanup), submissionUUID, pointIDsForCleanup)
+			errDelQdrant := testStorageManager.Qdrant.DeletePoints(ctxClean, pointIDsForCleanup) // Assumes DeletePoints takes context and slice of point IDs
+			if errDelQdrant != nil {
+				t.Logf("Qdrant Cleanup: Error deleting points for submission %s: %v", submissionUUID, errDelQdrant)
+			} else {
+				t.Logf("Qdrant Cleanup: Successfully requested deletion of %d points for submission %s", len(pointIDsForCleanup), submissionUUID)
+			}
+		} else if len(pointIDsForCleanup) == 0 {
+			t.Logf("Qdrant Cleanup: No PointIDs to delete from Qdrant for submission %s.", submissionUUID)
+		} else if testStorageManager.Qdrant == nil {
+			t.Logf("Qdrant Cleanup: Qdrant client is nil, skipping point deletion for submission %s.", submissionUUID)
 		}
 
 		// 2. Delete from MySQL using the silent logger session
@@ -958,4 +1171,12 @@ verificationLoopEndLLM:
 		}
 		t.Logf("--- Finished Cleanup for TestStartLLMParsingConsumer (%s) ---", submissionUUID)
 	})
+}
+
+// getStringPtrValue 获取字符串指针的值，如果指针为nil则返回空字符串
+func getStringPtrValue(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

@@ -4,6 +4,8 @@ import (
 	"ai-agent-go/internal/config"
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -35,6 +37,9 @@ type ObjectStorage interface {
 	UploadParsedText(ctx context.Context, submissionUUID string, text string) (string, error)
 	GetResumeFile(ctx context.Context, objectName string) ([]byte, error)
 	GetParsedText(ctx context.Context, objectName string) (string, error)
+
+	// 新增: 流式上传并计算MD5
+	UploadResumeFileStreaming(ctx context.Context, submissionUUID, fileExt string, reader io.Reader, fileSize int64) (string, string, error)
 }
 
 // 确保MinIO实现了ObjectStorage接口
@@ -447,4 +452,39 @@ func getContentType(ext string) string {
 // Temporary helper for conditional test logging in MinIO methods
 func minioTestLoggingEnabled() bool {
 	return os.Getenv("AI_AGENT_MINIO_TEST_LOGGING") == "true"
+}
+
+// UploadResumeFileStreaming 流式上传简历文件并同时计算MD5
+// 返回: objectKey, md5Hex, error
+func (m *MinIO) UploadResumeFileStreaming(ctx context.Context, submissionUUID, fileExt string, reader io.Reader, fileSize int64) (string, string, error) {
+	objectName := fmt.Sprintf("resume/%s/original%s", submissionUUID, fileExt)
+	contentType := getContentType(fileExt)
+
+	// 创建MD5哈希计算器
+	md5Hash := md5.New()
+
+	// 使用TeeReader同时读取到哈希计算器
+	teeReader := io.TeeReader(reader, md5Hash)
+
+	if minioTestLoggingEnabled() {
+		m.logger.Printf("[MinIO-UploadResumeFileStreaming] Uploading: SubmissionUUID='%s', FileExt='%s', ObjectName='%s', Bucket='%s'",
+			submissionUUID, fileExt, objectName, m.originalBucket)
+	}
+
+	// 将文件流式上传到MinIO
+	info, err := m.client.PutObject(ctx, m.originalBucket, objectName, teeReader,
+		fileSize, minio.PutObjectOptions{ContentType: contentType})
+	if err != nil {
+		return "", "", fmt.Errorf("流式上传文件到MinIO失败: %w", err)
+	}
+
+	// 计算MD5哈希值
+	md5Hex := hex.EncodeToString(md5Hash.Sum(nil))
+
+	if minioTestLoggingEnabled() {
+		m.logger.Printf("[MinIO-UploadResumeFileStreaming] Successfully uploaded %s, ETag: %s, Size: %d, MD5: %s",
+			objectName, info.ETag, info.Size, md5Hex)
+	}
+
+	return objectName, md5Hex, nil
 }
