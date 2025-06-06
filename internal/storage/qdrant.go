@@ -227,19 +227,22 @@ func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks
 	points := make([]QdrantPoint, 0, len(chunks))
 	storedPointIDs := make([]string, 0, len(chunks))
 
+	// 从 resumeID (submission_uuid) 创建一个命名空间UUID
+	// 这确保了对于给定的提交，其点ID是确定性的。
+	namespaceUUID, err := uuid.FromString(resumeID)
+	if err != nil {
+		return nil, fmt.Errorf("无法从 resumeID '%s' 创建命名空间UUID: %w", resumeID, err)
+	}
+
 	for i, chunk := range chunks {
 		if embeddings[i] == nil {
 			log.Printf("StoreResumeVectors: resumeID %s, chunk %d 的嵌入向量为nil，跳过存储", resumeID, chunk.ChunkID)
 			continue
 		}
 
-		// 为每个点生成新的UUID作为其ID
-		pointUUID, err := uuid.NewV7()
-		if err != nil {
-			log.Printf("StoreResumeVectors: resumeID %s, chunk %d 生成UUID失败: %v, 跳过此点", resumeID, chunk.ChunkID, err)
-			return nil, fmt.Errorf("为点生成UUID失败: %w", err) // 或者选择跳过这个点并继续
-		}
-		pointID := pointUUID.String()
+		// 为每个点生成确定性的UUIDv5作为其ID
+		// 这确保了对同一份简历的同一分块的重复处理不会在Qdrant中创建重复的点，从而实现幂等性
+		pointID := uuid.NewV5(namespaceUUID, fmt.Sprintf("chunk-%d", chunk.ChunkID)).String()
 
 		// 构建载荷 (Payload)
 		payload := map[string]interface{}{
