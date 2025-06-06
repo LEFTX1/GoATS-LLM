@@ -11,6 +11,7 @@ type ResumeUploadMessage struct {
 	TargetJobID         string    `json:"target_job_id,omitempty"`  // 目标岗位ID
 	OriginalFilename    string    `json:"original_filename"`        // 原始文件名
 	OriginalFilePathOSS string    `json:"original_file_path_oss"`   // MinIO中的对象路径
+	RawFileMD5          string    `json:"raw_file_md5,omitempty"`   // 原始文件的MD5，用于失败时回滚
 
 	// 兼容性字段 (可选)
 	OriginalFileObjectKey string `json:"original_file_object_key,omitempty"` // 与OriginalFilePathOSS同义

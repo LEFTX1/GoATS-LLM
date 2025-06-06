@@ -52,5 +52,5 @@ func ConvertArrayToJSON(arr []string) datatypes.JSON {
 		return datatypes.JSON("[]")
 	}
 
-	return datatypes.JSON(jsonBytes)
+	return jsonBytes
 }

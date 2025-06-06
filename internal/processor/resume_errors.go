@@ -39,7 +39,7 @@ func (e *ResumeProcessError) Is(target error) bool {
 	return errors.Is(e.BaseErr, target)
 }
 
-// 错误构造函数
+// NewDownloadError 错误构造函数
 func NewDownloadError(uuid, detail string) error {
 	return &ResumeProcessError{
 		SubmissionUUID: uuid,

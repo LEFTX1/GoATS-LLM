@@ -14,22 +14,22 @@ import (
 
 // MessageQueue 消息队列接口
 type MessageQueue interface {
-	// 发布消息
+	// PublishMessage 发布消息
 	PublishMessage(ctx context.Context, exchangeName, routingKey string, message []byte, persistent bool) error
 
-	// 发布JSON格式消息
+	// PublishJSON 发布JSON格式消息
 	PublishJSON(ctx context.Context, exchangeName, routingKey string, data interface{}, persistent bool) error
 
-	// 确保交换机存在
+	// EnsureExchange 确保交换机存在
 	EnsureExchange(exchangeName, exchangeType string, durable bool) error
 
-	// 确保队列存在
+	// EnsureQueue 确保队列存在
 	EnsureQueue(queueName string, durable bool) error
 
-	// 绑定队列到交换机
+	// BindQueue 绑定队列到交换机
 	BindQueue(queueName, exchangeName, routingKey string) error
 
-	// 关闭连接
+	// Close 关闭连接
 	Close() error
 }
 

@@ -8,7 +8,7 @@ import (
 	"github.com/cloudwego/eino/components/embedding"
 )
 
-// 组件配置选项
+// ProcessorConfig 组件配置选项
 type ProcessorConfig struct {
 	// 是否使用LLM进行分块
 	UseLLM bool
@@ -23,7 +23,7 @@ type ProcessorConfig struct {
 	ExtraOptions map[string]interface{}
 }
 
-// 处理结果
+// ProcessResult 处理结果
 type ProcessResult struct {
 	// 提取的文本
 	Text string
@@ -123,7 +123,7 @@ type JobMatchEvaluator interface {
 	EvaluateMatch(ctx context.Context, jobDescription string, resumeText string) (*types.JobMatchEvaluation, error)
 }
 
-// 嵌入向量生成器接口
+// EmbeddingGenerator 嵌入向量生成器接口
 type EmbeddingGenerator interface {
 	// CreateEmbeddings 为一批文本生成嵌入向量
 	CreateEmbeddings(ctx context.Context, texts []string) ([][]float32, error)

@@ -63,7 +63,7 @@ func WithHttpTimeout(timeout time.Duration) QdrantOption {
 // NewQdrant 创建Qdrant客户端
 func NewQdrant(cfg *config.QdrantConfig, opts ...QdrantOption) (*Qdrant, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("Qdrant配置不能为空")
+		return nil, fmt.Errorf("qdrant配置不能为空")
 	}
 
 	endpoint := cfg.Endpoint
@@ -298,7 +298,7 @@ func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks
 	respBody, _ := io.ReadAll(resp.Body) // 读取响应体以供调试
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Qdrant点upsert失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("qdrant点upsert失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
 	}
 
 	// 检查响应状态

@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	// 默认的全局日志实例
+	// Logger 默认的全局日志实例
 	Logger = log.Logger
 )
 
@@ -90,12 +90,12 @@ func Fatal() *zerolog.Event {
 	return Logger.Fatal()
 }
 
-// 使用上下文的日志记录
+// Ctx 使用上下文的日志记录
 func Ctx(ctx context.Context) *zerolog.Logger {
 	return zerolog.Ctx(ctx)
 }
 
-// 将zerolog记录器添加到上下文
+// WithContext 将zerolog记录器添加到上下文
 func WithContext(ctx context.Context) context.Context {
 	return Logger.WithContext(ctx)
 }

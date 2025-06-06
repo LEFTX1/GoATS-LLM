@@ -38,28 +38,28 @@ func ConvertOldOptions(oldOpts []ProcessorOption) ([]ComponentOpt, []SettingOpt)
 	// 创建对应的新组件选项
 	var compOpts []ComponentOpt
 	if tempProcessor.PDFExtractor != nil {
-		compOpts = append(compOpts, WithComp_PDFExtractor(tempProcessor.PDFExtractor))
+		compOpts = append(compOpts, WithcompPdfextractor(tempProcessor.PDFExtractor))
 	}
 	if tempProcessor.ResumeChunker != nil {
-		compOpts = append(compOpts, WithComp_ResumeChunker(tempProcessor.ResumeChunker))
+		compOpts = append(compOpts, WithcompResumechunker(tempProcessor.ResumeChunker))
 	}
 	if tempProcessor.ResumeEmbedder != nil {
-		compOpts = append(compOpts, WithComp_ResumeEmbedder(tempProcessor.ResumeEmbedder))
+		compOpts = append(compOpts, WithcompResumeembedder(tempProcessor.ResumeEmbedder))
 	}
 	if tempProcessor.MatchEvaluator != nil {
-		compOpts = append(compOpts, WithComp_JobMatchEvaluator(tempProcessor.MatchEvaluator))
+		compOpts = append(compOpts, WithcompJobmatchevaluator(tempProcessor.MatchEvaluator))
 	}
 	if tempProcessor.Storage != nil {
-		compOpts = append(compOpts, WithComp_Storage(tempProcessor.Storage))
+		compOpts = append(compOpts, WithcompStorage(tempProcessor.Storage))
 	}
 
 	// 创建对应的新设置选项
 	var setOpts []SettingOpt
-	setOpts = append(setOpts, WithSet_UseLLM(tempProcessor.Config.UseLLM))
-	setOpts = append(setOpts, WithSet_DefaultDimensions(tempProcessor.Config.DefaultDimensions))
-	setOpts = append(setOpts, WithSet_Debug(tempProcessor.Config.Debug))
+	setOpts = append(setOpts, WithsetUsellm(tempProcessor.Config.UseLLM))
+	setOpts = append(setOpts, WithsetDefaultdimensions(tempProcessor.Config.DefaultDimensions))
+	setOpts = append(setOpts, WithsetDebug(tempProcessor.Config.Debug))
 	if tempProcessor.Config.Logger != nil {
-		setOpts = append(setOpts, WithSet_Logger(tempProcessor.Config.Logger))
+		setOpts = append(setOpts, WithsetLogger(tempProcessor.Config.Logger))
 	}
 
 	return compOpts, setOpts
@@ -67,36 +67,36 @@ func ConvertOldOptions(oldOpts []ProcessorOption) ([]ComponentOpt, []SettingOpt)
 
 // ----- 新版组件选项 -----
 
-// WithComp_PDFExtractor 设置PDF提取器组件
-func WithComp_PDFExtractor(extractor PDFExtractor) ComponentOpt {
+// WithcompPdfextractor 设置PDF提取器组件
+func WithcompPdfextractor(extractor PDFExtractor) ComponentOpt {
 	return func(c *Components) {
 		c.PDFExtractor = extractor
 	}
 }
 
-// WithComp_ResumeChunker 设置简历分块器组件
-func WithComp_ResumeChunker(chunker ResumeChunker) ComponentOpt {
+// WithcompResumechunker 设置简历分块器组件
+func WithcompResumechunker(chunker ResumeChunker) ComponentOpt {
 	return func(c *Components) {
 		c.ResumeChunker = chunker
 	}
 }
 
-// WithComp_ResumeEmbedder 设置简历嵌入器组件
-func WithComp_ResumeEmbedder(embedder ResumeEmbedder) ComponentOpt {
+// WithcompResumeembedder 设置简历嵌入器组件
+func WithcompResumeembedder(embedder ResumeEmbedder) ComponentOpt {
 	return func(c *Components) {
 		c.ResumeEmbedder = embedder
 	}
 }
 
-// WithComp_JobMatchEvaluator 设置岗位匹配评估器组件
-func WithComp_JobMatchEvaluator(evaluator JobMatchEvaluator) ComponentOpt {
+// WithcompJobmatchevaluator 设置岗位匹配评估器组件
+func WithcompJobmatchevaluator(evaluator JobMatchEvaluator) ComponentOpt {
 	return func(c *Components) {
 		c.MatchEvaluator = evaluator
 	}
 }
 
-// WithComp_Storage 设置存储组件
-func WithComp_Storage(storage *storage.Storage) ComponentOpt {
+// WithcompStorage 设置存储组件
+func WithcompStorage(storage *storage.Storage) ComponentOpt {
 	return func(c *Components) {
 		c.Storage = storage
 	}
@@ -104,15 +104,15 @@ func WithComp_Storage(storage *storage.Storage) ComponentOpt {
 
 // ----- 新版设置选项 -----
 
-// WithSet_Debug 设置调试模式
-func WithSet_Debug(debug bool) SettingOpt {
+// WithsetDebug 设置调试模式
+func WithsetDebug(debug bool) SettingOpt {
 	return func(s *Settings) {
 		s.Debug = debug
 	}
 }
 
-// WithSet_Logger 设置日志记录器
-func WithSet_Logger(logger *log.Logger) SettingOpt {
+// WithsetLogger 设置日志记录器
+func WithsetLogger(logger *log.Logger) SettingOpt {
 	return func(s *Settings) {
 		if logger != nil {
 			s.Logger = logger
@@ -123,22 +123,22 @@ func WithSet_Logger(logger *log.Logger) SettingOpt {
 	}
 }
 
-// WithSet_DefaultDimensions 设置默认向量维度
-func WithSet_DefaultDimensions(dimensions int) SettingOpt {
+// WithsetDefaultdimensions 设置默认向量维度
+func WithsetDefaultdimensions(dimensions int) SettingOpt {
 	return func(s *Settings) {
 		s.DefaultDimensions = dimensions
 	}
 }
 
-// WithSet_UseLLM 设置是否使用LLM
-func WithSet_UseLLM(useLLM bool) SettingOpt {
+// WithsetUsellm 设置是否使用LLM
+func WithsetUsellm(useLLM bool) SettingOpt {
 	return func(s *Settings) {
 		s.UseLLM = useLLM
 	}
 }
 
-// WithSet_TimeLocation 设置时区
-func WithSet_TimeLocation(loc *time.Location) SettingOpt {
+// WithsetTimelocation 设置时区
+func WithsetTimelocation(loc *time.Location) SettingOpt {
 	return func(s *Settings) {
 		if loc != nil {
 			s.TimeLocation = loc

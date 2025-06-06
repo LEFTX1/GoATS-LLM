@@ -174,7 +174,7 @@ func (e *TikaPDFExtractor) ExtractTextFromBytes(ctx context.Context, data []byte
 
 	// 检查响应状态
 	if resp.StatusCode != http.StatusOK {
-		return "", baseMetadata, fmt.Errorf("Tika服务器返回错误状态码: %d", resp.StatusCode)
+		return "", baseMetadata, fmt.Errorf("tika服务器返回错误状态码: %d", resp.StatusCode)
 	}
 
 	// 读取响应内容
@@ -278,7 +278,7 @@ func (e *TikaPDFExtractor) ExtractStructuredContent(ctx context.Context, reader 
 
 	// 检查响应状态
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Tika服务器返回错误状态码: %d", resp.StatusCode)
+		return nil, fmt.Errorf("tika服务器返回错误状态码: %d", resp.StatusCode)
 	}
 
 	// 读取响应内容（HTML格式）
@@ -352,7 +352,7 @@ func (e *TikaPDFExtractor) extractMetadata(ctx context.Context, data []byte, uri
 
 	// 检查响应状态
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Tika服务器返回错误状态码: %d", resp.StatusCode)
+		return nil, fmt.Errorf("tika服务器返回错误状态码: %d", resp.StatusCode)
 	}
 
 	// 读取响应内容

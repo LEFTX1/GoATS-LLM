@@ -4,7 +4,7 @@ import (
 	"ai-agent-go/internal/config"
 	"ai-agent-go/internal/parser"
 	"ai-agent-go/internal/storage"
-	storage_types "ai-agent-go/internal/storage"
+	storagetypes "ai-agent-go/internal/storage"
 	"ai-agent-go/internal/storage/models"
 	"ai-agent-go/internal/types"
 	"context"
@@ -334,7 +334,7 @@ func TestProcessUploadedResume_TransactionRollback(t *testing.T) {
 
 	// 6. 准备测试数据 - 使用固定UUID而不是时间戳生成的
 	testSubmissionUUID := "test-transaction-rollback-fixed-uuid"
-	message := storage_types.ResumeUploadMessage{
+	message := storagetypes.ResumeUploadMessage{
 		SubmissionUUID:      testSubmissionUUID,
 		OriginalFilePathOSS: "non-existent-file.pdf", // 不存在的文件，确保会失败
 	}
@@ -508,7 +508,7 @@ func TestProcessUploadedResume_ConcurrentAccess(t *testing.T) {
 
 	// 6. 准备并发测试 - 创建多个处理器同时处理同一个简历
 	const concurrentProcessors = 5
-	message := storage_types.ResumeUploadMessage{
+	message := storagetypes.ResumeUploadMessage{
 		SubmissionUUID:      testSubmissionUUID,
 		OriginalFilePathOSS: "non-existent-concurrent.pdf",
 	}
@@ -793,7 +793,7 @@ func TestMQMessageIdempotence(t *testing.T) {
 	)
 
 	// 7. 模拟MQ消息重投 - 创建处理消息
-	message := storage_types.ResumeProcessingMessage{
+	message := storagetypes.ResumeProcessingMessage{
 		SubmissionUUID:      testSubmissionUUID,
 		ParsedTextPathOSS:   "test-parsed.txt",
 		ParsedTextObjectKey: "test-parsed.txt",

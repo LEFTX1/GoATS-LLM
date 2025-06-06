@@ -111,6 +111,20 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 			Str("md5", fileMD5Hex).
 			Str("filename", fileHeader.Filename).
 			Msg("检测到重复的文件MD5，跳过处理")
+
+		// 异步删除已上传的重复文件，避免存储资源浪费
+		go func(key string) {
+			// 创建一个独立的后台上下文，避免受HTTP请求生命周期影响
+			// 为删除操作设置一个合理的超时时间
+			bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := h.storage.MinIO.DeleteResumeFile(bgCtx, key); err != nil {
+				logger.Error().Err(err).Str("objectKey", key).Msg("异步删除MinIO中的重复文件失败")
+			} else {
+				logger.Info().Str("objectKey", key).Msg("成功异步删除MinIO中的重复文件")
+			}
+		}(originalObjectKey)
+
 		// 返回409 Conflict（语义上更正确）而不是200 OK
 		ctx.JSON(http.StatusConflict, ResumeUploadResponse{
 			SubmissionUUID: "",
@@ -127,6 +141,7 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 		TargetJobID:         targetJobID,
 		SourceChannel:       sourceChannel,
 		SubmissionTimestamp: time.Now(),
+		RawFileMD5:          fileMD5Hex, // 填充MD5，用于失败场景的回滚
 
 		// 兼容性字段 (保留以向后兼容旧版客户端)
 		OriginalFileObjectKey: originalObjectKey,
@@ -155,6 +170,10 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 
 // StartResumeUploadConsumer 启动简历上传消费者
 func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize int, batchTimeout time.Duration) error {
+	if h.storage == nil || h.storage.RabbitMQ == nil {
+		logger.Warn().Msg("RabbitMQ client is nil, skipping resume upload consumer start.")
+		return nil // Not an error, just skipping in environments without MQ
+	}
 	// 添加日志打印当前配置中的交换机名称
 	logger.Info().
 		Str("exchange", h.cfg.RabbitMQ.ResumeEventsExchange).
@@ -206,6 +225,21 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 		}
 		if err := h.storage.MySQL.BatchInsertResumeSubmissions(ctx, []models.ResumeSubmission{submission}); err != nil {
 			logger.Error().Err(err).Str("submission_uuid", message.SubmissionUUID).Msg("插入初始简历提交记录失败")
+
+			// 补偿操作：如果DB插入失败，则从Redis中移除之前添加的MD5，以允许重试
+			if message.RawFileMD5 != "" {
+				go func(md5ToRollback string) {
+					// 创建一个独立的后台上下文，以防主上下文已取消
+					bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer cancel()
+					if err := h.storage.Redis.RemoveRawFileMD5(bgCtx, md5ToRollback); err != nil {
+						logger.Error().Err(err).Str("md5", md5ToRollback).Msg("补偿操作：异步删除Redis中的文件MD5失败")
+					} else {
+						logger.Info().Str("md5", md5ToRollback).Msg("补偿操作：成功异步删除Redis中的文件MD5")
+					}
+				}(message.RawFileMD5)
+			}
+
 			return false // 插入失败，不继续
 		}
 
@@ -237,6 +271,10 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 
 // StartLLMParsingConsumer 启动LLM解析消费者
 func (h *ResumeHandler) StartLLMParsingConsumer(ctx context.Context, prefetchCount int) error {
+	if h.storage == nil || h.storage.RabbitMQ == nil {
+		logger.Warn().Msg("RabbitMQ client is nil, skipping LLM parsing consumer start.")
+		return nil // Not an error, just skipping in environments without MQ
+	}
 	// 1. 确保交换机和队列存在
 	if err := h.storage.RabbitMQ.EnsureExchange(h.cfg.RabbitMQ.ProcessingEventsExchange, "direct", true); err != nil {
 		return fmt.Errorf("确保交换机存在失败: %w", err)

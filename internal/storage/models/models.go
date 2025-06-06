@@ -71,6 +71,7 @@ type ResumeSubmission struct {
 	RawTextMD5          string         `gorm:"type:char(32);index:idx_rs_raw_text_md5"`
 	SimilarityHash      *string        `gorm:"type:char(16);uniqueIndex:idx_rs_similarity_hash"` // 新增字段，注意设为指针以允许NULL
 	LLMParsedBasicInfo  datatypes.JSON `gorm:"type:json"`
+	QdrantPointIDs      datatypes.JSON `gorm:"type:json"` // 新增: 存储与此简历关联的Qdrant Point ID列表
 	LLMResumeIdentifier string         `gorm:"type:varchar(255)"`
 	ProcessingStatus    string         `gorm:"type:varchar(50);default:'PENDING_PARSING';index:idx_rs_processing_status"`
 	ParserVersion       string         `gorm:"type:varchar(50)"`

@@ -147,22 +147,22 @@ func (m *MySQL) Close() error {
 	return sqlDB.Close()
 }
 
-// 泛型查询方法 - 通过ID获取记录
+// GetByID 泛型查询方法 - 通过ID获取记录
 func (m *MySQL) GetByID(id interface{}, dest interface{}) error {
 	return m.db.First(dest, "id = ?", id).Error
 }
 
-// 泛型查询方法 - 通过条件查询记录
+// Find 泛型查询方法 - 通过条件查询记录
 func (m *MySQL) Find(dest interface{}, query interface{}, args ...interface{}) error {
 	return m.db.Where(query, args...).Find(dest).Error
 }
 
-// 泛型创建/更新方法
+// Save 泛型创建/更新方法
 func (m *MySQL) Save(value interface{}) error {
 	return m.db.Save(value).Error
 }
 
-// 泛型删除方法
+// Delete 泛型删除方法
 func (m *MySQL) Delete(value interface{}, query interface{}, args ...interface{}) error {
 	return m.db.Where(query, args...).Delete(value).Error
 }
@@ -189,19 +189,31 @@ func (m *MySQL) UpdateResumeRawTextMD5(ctx context.Context, submissionUUID strin
 }
 
 // SaveResumeChunks 保存简历分块信息 (在事务中执行)
-func (m *MySQL) SaveResumeChunks(tx *gorm.DB, submissionUUID string, sections []*types.ResumeSection) error {
+func (m *MySQL) SaveResumeChunks(tx *gorm.DB, submissionUUID string, sections []*types.ResumeSection, pointIDs []string) error {
 	if len(sections) == 0 {
 		return nil
 	}
+	// 安全检查: 确保 pointIDs 长度与 sections 一致 (如果提供了 pointIDs)
+	if len(pointIDs) > 0 && len(sections) != len(pointIDs) {
+		return fmt.Errorf("sections and pointIDs length mismatch: %d != %d", len(sections), len(pointIDs))
+	}
+
 	chunks := make([]models.ResumeSubmissionChunk, len(sections))
 	for i, section := range sections {
-		chunks[i] = models.ResumeSubmissionChunk{
+		chunk := models.ResumeSubmissionChunk{
 			SubmissionUUID:      submissionUUID,
-			ChunkIDInSubmission: i + 1, // 从1开始的chunk_id
+			ChunkIDInSubmission: section.ChunkID, // 使用LLM生成的ChunkID
 			ChunkType:           string(section.Type),
 			ChunkTitle:          section.Title,
 			ChunkContentText:    section.Content,
 		}
+		// 如果提供了PointID并且长度匹配，则赋值
+		if len(pointIDs) > 0 {
+			if pointIDs[i] != "" {
+				chunk.PointID = &pointIDs[i]
+			}
+		}
+		chunks[i] = chunk
 	}
 	return tx.Create(&chunks).Error
 }

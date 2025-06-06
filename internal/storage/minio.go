@@ -32,13 +32,13 @@ type ObjectStorage interface {
 	// DeleteFile 删除文件
 	DeleteFile(ctx context.Context, objectName string) error
 
-	// ResumeSpecific 简历特定操作
+	// UploadResumeFile ResumeSpecific 简历特定操作
 	UploadResumeFile(ctx context.Context, submissionUUID, fileExt string, reader io.Reader, fileSize int64) (string, error)
 	UploadParsedText(ctx context.Context, submissionUUID string, text string) (string, error)
 	GetResumeFile(ctx context.Context, objectName string) ([]byte, error)
 	GetParsedText(ctx context.Context, objectName string) (string, error)
 
-	// 新增: 流式上传并计算MD5
+	// UploadResumeFileStreaming 新增: 流式上传并计算MD5
 	UploadResumeFileStreaming(ctx context.Context, submissionUUID, fileExt string, reader io.Reader, fileSize int64) (string, string, error)
 }
 
@@ -160,8 +160,8 @@ func (m *MinIO) setupLifecycleRules(ctx context.Context) error {
 // setupBucketLifecycle 为指定存储桶设置生命周期规则
 func (m *MinIO) setupBucketLifecycle(ctx context.Context, bucketName, ruleID string, expiryDays int) error {
 	m.logger.Printf("[MinIO] Setting lifecycle rule for bucket %s: ID=%s, ExpiryDays=%d", bucketName, ruleID, expiryDays)
-	config := lifecycle.NewConfiguration()
-	config.Rules = []lifecycle.Rule{
+	cfg := lifecycle.NewConfiguration()
+	cfg.Rules = []lifecycle.Rule{
 		{
 			ID:     ruleID,
 			Status: "Enabled",
@@ -171,7 +171,7 @@ func (m *MinIO) setupBucketLifecycle(ctx context.Context, bucketName, ruleID str
 		},
 	}
 
-	err := m.client.SetBucketLifecycle(ctx, bucketName, config)
+	err := m.client.SetBucketLifecycle(ctx, bucketName, cfg)
 	if err != nil {
 		m.logger.Printf("[MinIO] Error setting lifecycle for bucket %s: %v", bucketName, err)
 		return err
@@ -260,6 +260,17 @@ func (m *MinIO) UploadResumeFile(ctx context.Context, submissionUUID, fileExt st
 	}
 
 	return objectName, nil // 确保返回的是最初构建的 objectName
+}
+
+// DeleteResumeFile 从originalsBucket中删除指定的简历文件
+func (m *MinIO) DeleteResumeFile(ctx context.Context, objectKey string) error {
+	m.logger.Printf("[MinIO] Deleting original resume file: ObjectKey=%s, Bucket=%s", objectKey, m.originalBucket)
+	err := m.client.RemoveObject(ctx, m.originalBucket, objectKey, minio.RemoveObjectOptions{})
+	if err != nil {
+		m.logger.Printf("[MinIO] Error deleting object %s from bucket %s: %v", objectKey, m.originalBucket, err)
+		return fmt.Errorf("从MinIO删除对象 %s 失败: %w", objectKey, err)
+	}
+	return nil
 }
 
 // UploadParsedText 上传解析后的文本到MinIO

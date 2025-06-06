@@ -44,13 +44,7 @@ type Config struct {
 		Embedding  EmbeddingConfig   `yaml:"embedding"`   // Embedding specific config
 	} `yaml:"aliyun"`
 
-	Qdrant struct {
-		Endpoint           string `yaml:"endpoint"`
-		Collection         string `yaml:"collection"`
-		Dimension          int    `yaml:"dimension"`
-		APIKey             string `yaml:"api_key,omitempty"`    // 可选的API Key
-		DefaultSearchLimit int    `yaml:"default_search_limit"` // 新增：默认搜索结果数量
-	} `yaml:"qdrant"`
+	Qdrant QdrantConfig `yaml:"qdrant"`
 
 	// Tika服务器配置
 	Tika TikaConfig `yaml:"tika"`
@@ -197,6 +191,14 @@ type JobEvaluatorConfig struct {
 	RetryWaitSeconds int     `yaml:"retryWaitSeconds"` // 重试等待时间(秒)
 }
 
+// LoggerConfig 日志配置
+type LoggerConfig struct {
+	Level        string `yaml:"level"`         // debug, info, warn, error
+	Format       string `yaml:"format"`        // json, pretty
+	TimeFormat   string `yaml:"time_format"`   // 时间格式
+	ReportCaller bool   `yaml:"report_caller"` // 是否报告调用位置
+}
+
 // QdrantConfig Qdrant向量数据库配置
 type QdrantConfig struct {
 	Endpoint           string `yaml:"endpoint"`             // Qdrant gRPC 服务地址
@@ -204,14 +206,6 @@ type QdrantConfig struct {
 	Dimension          int    `yaml:"dimension"`            // 向量维度
 	APIKey             string `yaml:"api_key,omitempty"`    // (可选) Qdrant API Key
 	DefaultSearchLimit int    `yaml:"default_search_limit"` // 新增：默认搜索结果数量
-}
-
-// LoggerConfig 日志配置
-type LoggerConfig struct {
-	Level        string `yaml:"level"`         // debug, info, warn, error
-	Format       string `yaml:"format"`        // json, pretty
-	TimeFormat   string `yaml:"time_format"`   // 时间格式
-	ReportCaller bool   `yaml:"report_caller"` // 是否报告调用位置
 }
 
 // LoadConfig 从文件加载配置

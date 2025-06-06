@@ -3,8 +3,9 @@ package main
 import (
 	"ai-agent-go/internal/api/handler"
 	"ai-agent-go/internal/api/router"
-	"ai-agent-go/internal/config"        // Renamed to appLogger in var block to avoid conflict
-	parser "ai-agent-go/internal/parser" // aliased to avoid conflict with std log
+	"ai-agent-go/internal/config" // Renamed to appLogger in var block to avoid conflict
+	"ai-agent-go/internal/outbox"
+	"ai-agent-go/internal/parser" // aliased to avoid conflict with std log
 	"ai-agent-go/internal/processor"
 	"ai-agent-go/internal/storage"
 	"context"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 
 	// Eino imports - Keep only essential ones for now
 	"github.com/cloudwego/eino/components/model" // For model.ToolCallingChatModel interface
@@ -63,6 +65,12 @@ func main() {
 	}
 	defer storageManager.Close()
 	glog.Info("存储服务初始化成功")
+
+	// Initialize and start the Message Relay
+	relayLogger := log.New(appCoreLogger.Logger, "[MessageRelay] ", log.LstdFlags|log.Lshortfile)
+	messageRelay := outbox.NewMessageRelay(storageManager.MySQL.DB(), storageManager.RabbitMQ, relayLogger)
+	messageRelay.Start()
+	glog.Info("消息中继服务已启动")
 
 	aliyunEmbeddingConfig := config.EmbeddingConfig{
 		Model:      cfg.Aliyun.Embedding.Model,
@@ -127,15 +135,26 @@ func main() {
 	}
 	glog.Info("DefaultResumeEmbedder初始化成功")
 
-	resumeProcessor := processor.NewResumeProcessor(
-		processor.WithPDFExtractor(pdfExtractor),
-		processor.WithResumeChunker(resumeChunker),
-		processor.WithResumeEmbedder(defaultResumeEmbedder),
-		processor.WithJobMatchEvaluator(jobEvaluator),
-		processor.WithDefaultDimensions(cfg.Qdrant.Dimension),
-		processor.WithDebugMode(cfg.Logger.Level == "debug"),
-		processor.WithStorage(storageManager),
-	)
+	// -- Refactored Processor Initialization --
+	// Standardize on using NewResumeProcessorV2 for clarity and consistency.
+	procComponents := &processor.Components{
+		PDFExtractor:   pdfExtractor,
+		ResumeChunker:  resumeChunker,
+		ResumeEmbedder: defaultResumeEmbedder,
+		MatchEvaluator: jobEvaluator,
+		Storage:        storageManager,
+	}
+
+	processorLogger := log.New(appCoreLogger.Logger, "[ProcessorMain] ", log.LstdFlags|log.Lshortfile)
+	procSettings := &processor.Settings{
+		UseLLM:            true, // Defaulting to true as per previous logic
+		DefaultDimensions: cfg.Qdrant.Dimension,
+		Debug:             cfg.Logger.Level == "debug",
+		Logger:            processorLogger, // Use the stdlib logger wrapper for compatibility
+		TimeLocation:      time.Local,      // Default to local time zone
+	}
+
+	resumeProcessor := processor.NewResumeProcessorV2(procComponents, procSettings)
 	glog.Info("ResumeProcessor初始化成功")
 
 	// Use appCoreLogger.Logger which is zerolog.Logger and implements io.Writer
@@ -215,6 +234,10 @@ func main() {
 	<-quit
 	glog.Info("接收到终止信号，正在优雅退出...")
 
+	// Stop the message relay first
+	messageRelay.Stop()
+	glog.Info("消息中继服务已停止")
+
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	if err := h.Shutdown(shutdownCtx); err != nil {
@@ -231,38 +254,32 @@ func initLogger() {
 	}
 
 	// Configure the console writer part for appCoreLogger
-	consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
-		w.Out = os.Stderr
-		w.TimeFormat = "15:04:05"
-	})
+	consoleWriter := zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: "15:04:05",
+	}
 
 	multiWriter := zerolog.MultiLevelWriter(consoleWriter, fileWriter)
 
-	// Initialize appCoreLogger (our application's logger)
-	// This will set appCoreLogger.Logger to a zerolog.Logger instance using multiWriter
-	appCoreLogger.Init(appCoreLogger.Config{
-		Level:        "debug",    // Default or from config cfg.Logger.Level
-		Format:       "pretty",   // Default or from config cfg.Logger.Format, this mainly affects consoleWriter if used directly
-		TimeFormat:   "15:04:05", // Default or from config cfg.Logger.TimeFormat
-		ReportCaller: true,       // Default or from config cfg.Logger.ReportCaller
-		// Note: appCoreLogger.Init internally creates a zerolog.Logger and assigns it to appCoreLogger.Logger.
-		// We will use this appCoreLogger.Logger instance for the Hertz adapter.
-	})
+	// Re-implement logger initialization to use multiWriter correctly.
+	// The original appCoreLogger.Init was not using the file writer.
+	level := zerolog.DebugLevel // Default or from config
+	zerolog.SetGlobalLevel(level)
+	zerolog.TimeFieldFormat = "15:04:05" // Default or from config
+
+	// Create the logger instance
+	logger := zerolog.New(multiWriter).With().Timestamp().Caller().Logger()
+
+	// Set this as the global logger for both our app and zerolog's stdlib wrapper
+	appCoreLogger.Logger = logger
+	zlog.Logger = logger
 
 	// Now appCoreLogger.Logger is initialized and uses multiWriter.
 	// Create the Hertz logger adapter using the initialized appCoreLogger.Logger via From().
 	hertzCompatibleLogger := hertzadapter.From(appCoreLogger.Logger) // We can pass additional hertzadapter options here if needed,
-	// for example, to override the level specifically for Hertz if appCoreLogger's level is different.
-	// hertzadapter.WithLevel(hlog.LevelTrace), // Example: Set Hertz to Trace, even if appCoreLogger is Debug
 
 	// 设置 Hertz 的 glog
 	glog.SetLogger(hertzCompatibleLogger)
-	// glog.SetOutput(hertzCompatibleLogger) // The adapter should handle its output; or use appCoreLogger.Logger if direct io.Writer is needed
-	// Setting output might be redundant if WithLogger correctly sets up the underlying writer for Hertz.
-	// Typically, hertz-contrib adapters manage output themselves based on the provided logger.
-	// We can rely on the appCoreLogger.Logger (which writes to multiWriter) being used by the adapter.
-	glog.SetOutput(multiWriter) // Or, be explicit that glog should use the same multiWriter.
-
 	glog.SetLevel(glog.LevelDebug) // Set Hertz's global log level
 
 	log.Println("Logger initialized with Zerolog (appCoreLogger & glog via adapter), writing to console and file:", logFilePath)

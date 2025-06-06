@@ -40,7 +40,7 @@ func (m *MockJobEvalLLM) Generate(ctx context.Context, messages []*schema.Messag
 func (m *MockJobEvalLLM) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	// 对于JD评估器的测试，Stream通常不是必需的，可以返回nil或一个简单的实现
 	// 如果需要测试Stream行为，这里需要更复杂的模拟
-	return nil, fmt.Errorf("Stream not implemented for MockJobEvalLLM")
+	return nil, fmt.Errorf("stream not implemented for MockJobEvalLLM")
 }
 
 // BindTools (旧接口，为兼容性保留，但ToolCallingChatModel不直接使用)

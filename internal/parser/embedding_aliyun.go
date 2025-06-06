@@ -165,7 +165,7 @@ func (a *AliyunEmbedder) EmbedStrings(ctx context.Context, texts []string, opts 
 
 	if len(texts) == 0 {
 		a.logger.Println("EmbedStrings: No texts to embed, returning empty.")
-		outputEmbeddings := [][]float64{}
+		var outputEmbeddings [][]float64
 		// cbOutput := &embedding.CallbackOutput{ // (Commented out)
 		// 	Embeddings: outputEmbeddings,
 		// 	Config:     &embedding.Config{Model: effectiveModel},

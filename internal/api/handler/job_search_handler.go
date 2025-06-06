@@ -7,6 +7,7 @@ import (
 	"ai-agent-go/internal/storage/models"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -48,7 +49,7 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 	// 1. 获取岗位描述 (JD)
 	jdText, err := h.getJobDescription(ctx, jobID)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			h.logger.Printf("JobID: %s 未找到", jobID)
 			c.JSON(consts.StatusNotFound, map[string]string{"error": fmt.Sprintf("未找到 JobID 为 %s 的岗位", jobID)})
 		} else {
@@ -226,7 +227,7 @@ func (h *JobSearchHandler) HandleGetJobDescription(ctx context.Context, c *app.R
 
 	jdText, err := h.getJobDescription(ctx, jobID)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(consts.StatusNotFound, map[string]string{"error": fmt.Sprintf("未找到 JobID 为 %s 的岗位", jobID)})
 		} else {
 			h.logger.Printf("获取 JobID: %s 的岗位描述失败: %v", jobID, err)

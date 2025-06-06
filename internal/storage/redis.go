@@ -38,10 +38,10 @@ func (r *Redis) FormatKey(keyConstant string, parts ...string) string {
 // NewRedisAdapter creates a new Redis client connection (renamed from NewRedis)
 func NewRedisAdapter(cfg *config.RedisConfig) (*Redis, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("Redis config cannot be nil")
+		return nil, fmt.Errorf("redis config cannot be nil")
 	}
 	if cfg.Address == "" {
-		return nil, fmt.Errorf("Redis address is required")
+		return nil, fmt.Errorf("redis address is required")
 	}
 
 	// 使用扩展的配置选项
@@ -96,7 +96,7 @@ func (r *Redis) Close() error {
 // Ping checks the Redis connection
 func (r *Redis) Ping(ctx context.Context) error {
 	if r.Client == nil {
-		return fmt.Errorf("Redis client is not initialized")
+		return fmt.Errorf("redis client is not initialized")
 	}
 	return r.Client.Ping(ctx).Err()
 }
@@ -125,7 +125,7 @@ func (r *Redis) AddParsedTextMD5(ctx context.Context, md5Hex string) error {
 // addMD5WithExpirationInternal 内部辅助函数，用于添加MD5到指定集合并设置过期时间
 func (r *Redis) addMD5WithExpirationInternal(ctx context.Context, setKey string, md5Hex string) error {
 	if r.Client == nil {
-		return fmt.Errorf("Redis client is not initialized")
+		return fmt.Errorf("redis client is not initialized")
 	}
 	pipe := r.Client.Pipeline()
 	pipe.SAdd(ctx, setKey, md5Hex)
@@ -149,7 +149,7 @@ func (r *Redis) CheckParsedTextMD5Exists(ctx context.Context, md5Hex string) (bo
 // checkMD5ExistsInternal 内部辅助函数，用于检查MD5是否存在于指定集合
 func (r *Redis) checkMD5ExistsInternal(ctx context.Context, setKey string, md5Hex string) (bool, error) {
 	if r.Client == nil {
-		return false, fmt.Errorf("Redis client is not initialized")
+		return false, fmt.Errorf("redis client is not initialized")
 	}
 	return r.Client.SIsMember(ctx, setKey, md5Hex).Result()
 }
@@ -175,7 +175,7 @@ func (r *Redis) AddMD5WithExpiration(ctx context.Context, key string, md5 string
 func (r *Redis) CheckMD5Exists(ctx context.Context, setKey string, md5Hex string) (bool, error) {
 	// This method is deprecated. Similar to AddMD5WithExpiration.
 	if r.Client == nil {
-		return false, fmt.Errorf("Redis client is not initialized")
+		return false, fmt.Errorf("redis client is not initialized")
 	}
 	return r.Client.SIsMember(ctx, setKey, md5Hex).Result()
 }
@@ -185,7 +185,7 @@ func (r *Redis) CheckMD5Exists(ctx context.Context, setKey string, md5Hex string
 // modelVersion: 生成该向量的嵌入模型版本
 func (r *Redis) SetJobVector(ctx context.Context, jobID string, vector []float64, modelVersion string) error {
 	if r.Client == nil {
-		return fmt.Errorf("Redis client is not initialized")
+		return fmt.Errorf("redis client is not initialized")
 	}
 	key := r.FormatKey(constants.JobVectorCachePrefix, jobID)
 
@@ -205,7 +205,7 @@ func (r *Redis) SetJobVector(ctx context.Context, jobID string, vector []float64
 // GetJobVector 从缓存获取JD向量和模型版本
 func (r *Redis) GetJobVector(ctx context.Context, jobID string) ([]float64, string, error) {
 	if r.Client == nil {
-		return nil, "", fmt.Errorf("Redis client is not initialized")
+		return nil, "", fmt.Errorf("redis client is not initialized")
 	}
 	key := r.FormatKey(constants.JobVectorCachePrefix, jobID)
 
@@ -230,7 +230,7 @@ func (r *Redis) GetJobVector(ctx context.Context, jobID string) ([]float64, stri
 // keywordsJSON: 已经是JSON字符串的关键词列表
 func (r *Redis) SetJobKeywords(ctx context.Context, jobID string, keywordsJSON string) error {
 	if r.Client == nil {
-		return fmt.Errorf("Redis client is not initialized")
+		return fmt.Errorf("redis client is not initialized")
 	}
 	key := r.FormatKey(constants.JobKeywordsCachePrefix, jobID)
 	return r.Client.Set(ctx, key, keywordsJSON, constants.JDCacheDuration).Err()
@@ -239,7 +239,7 @@ func (r *Redis) SetJobKeywords(ctx context.Context, jobID string, keywordsJSON s
 // GetJobKeywords 从缓存获取JD关键词 (JSON字符串形式)
 func (r *Redis) GetJobKeywords(ctx context.Context, jobID string) (string, error) {
 	if r.Client == nil {
-		return "", fmt.Errorf("Redis client is not initialized")
+		return "", fmt.Errorf("redis client is not initialized")
 	}
 	key := r.FormatKey(constants.JobKeywordsCachePrefix, jobID)
 	val, err := r.Client.Get(ctx, key).Result()
@@ -305,4 +305,13 @@ func (r *Redis) CheckAndAddParsedTextMD5(ctx context.Context, md5Hex string) (ex
 	}
 
 	return result == 1, nil // 1表示已存在，0表示新添加
+}
+
+// RemoveRawFileMD5 从原始文件MD5集合中移除一个MD5（用于事务补偿）
+func (r *Redis) RemoveRawFileMD5(ctx context.Context, md5 string) error {
+	key := r.FormatKey(constants.RawFileMD5SetKey)
+	if err := r.Client.SRem(ctx, key, md5).Err(); err != nil {
+		return fmt.Errorf("从Redis集合 %s 移除MD5 %s 失败: %w", key, md5, err)
+	}
+	return nil
 }
