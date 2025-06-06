@@ -10,9 +10,13 @@ import (
 	"ai-agent-go/pkg/utils"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -47,12 +51,39 @@ type ResumeUploadResponse struct {
 
 // HandleResumeUpload 处理简历上传请求
 func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestContext) {
+	// 1. 文件大小校验
+	maxUploadSize := h.cfg.Upload.MaxSizeMB * 1024 * 1024 // h.cfg.Upload.MaxSizeMB 是 int64
+
+	// 优先使用 Content-Length 头进行校验，直接从header获取，避免框架的二次处理
+	clHeader := string(ctx.Request.Header.Peek("Content-Length"))
+	if clHeader != "" {
+		if cl, err := strconv.ParseInt(clHeader, 10, 64); err == nil {
+			if cl > maxUploadSize {
+				logger.Warn().
+					Int64("size", cl).
+					Int64("max_size", maxUploadSize).
+					Msg("上传文件大小超限 (根据Content-Length头)")
+				ctx.JSON(http.StatusRequestEntityTooLarge, map[string]interface{}{"error": fmt.Sprintf("文件大小不能超过 %d MB", h.cfg.Upload.MaxSizeMB)})
+				return
+			}
+		}
+	}
 
 	// 获取上传的文件
 	fileHeader, err := ctx.FormFile("file")
 	if err != nil {
 		logger.Error().Err(err).Msg("获取上传文件失败")
 		ctx.JSON(http.StatusBadRequest, map[string]interface{}{"error": "文件未找到或获取失败"})
+		return
+	}
+
+	// 如果 Content-Length 不可用或未通过，则回退到检查解析后的文件头大小，作为最后防线
+	if fileHeader.Size > maxUploadSize {
+		logger.Warn().
+			Int64("size", fileHeader.Size).
+			Int64("max_size", maxUploadSize).
+			Msg("上传文件大小超限 (根据multipart form)")
+		ctx.JSON(http.StatusRequestEntityTooLarge, map[string]interface{}{"error": fmt.Sprintf("文件大小不能超过 %d MB", h.cfg.Upload.MaxSizeMB)})
 		return
 	}
 
@@ -72,6 +103,45 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	}
 	defer file.Close()
 
+	// 2. 文件类型校验 (MIME Sniffing)
+	// 只读取前512字节用于类型检测，避免读取整个大文件到内存
+	buffer := make([]byte, 512)
+	n, err := file.Read(buffer)
+	if err != nil && err != io.EOF {
+		logger.Error().Err(err).Msg("读取文件头用于MIME检测失败")
+		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "读取文件头失败"})
+		return
+	}
+	// 将文件指针重置回开头，以便后续流程能读取完整文件
+	if _, err := file.Seek(0, 0); err != nil {
+		logger.Error().Err(err).Msg("重置文件读取指针失败")
+		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "重置文件指针失败"})
+		return
+	}
+
+	mimeType := http.DetectContentType(buffer[:n])
+	// 从 "type/subtype; params" 中提取 "type/subtype"，并转为小写以进行不区分大小写的比较
+	baseMimeType, _, _ := strings.Cut(mimeType, ";")
+	baseMimeType = strings.TrimSpace(strings.ToLower(baseMimeType))
+
+	allowed := false
+	for _, allowedType := range h.cfg.Upload.AllowedMIMETypes {
+		// 比较时也将配置中的类型转为小写，以防配置中存在大小写问题
+		if baseMimeType == strings.ToLower(strings.TrimSpace(allowedType)) {
+			allowed = true
+			break
+		}
+	}
+
+	if !allowed {
+		logger.Warn().
+			Str("detected_mime_type", mimeType).
+			Str("filename", fileHeader.Filename).
+			Msg("检测到不允许的文件MIME类型")
+		ctx.JSON(http.StatusUnsupportedMediaType, map[string]interface{}{"error": fmt.Sprintf("不支持的文件类型: %s", baseMimeType)})
+		return
+	}
+
 	// 1. 生成UUIDv7
 	uuidV7, err := uuid.NewV7()
 	if err != nil {
@@ -88,8 +158,24 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	}
 
 	// 3. 流式上传文件到MinIO并同时计算MD5
-	originalObjectKey, fileMD5Hex, err := h.storage.MinIO.UploadResumeFileStreaming(c, submissionUUID, ext, file, fileHeader.Size)
+	// 从配置中读取超时时间，如果未设置则使用默认值
+	uploadTimeout := h.cfg.Upload.Timeout
+	if uploadTimeout <= 0 {
+		uploadTimeout = 2 * time.Minute // 默认2分钟
+	}
+	uploadCtx, cancel := context.WithTimeout(c, uploadTimeout)
+	defer cancel()
+
+	originalObjectKey, fileMD5Hex, err := h.storage.MinIO.UploadResumeFileStreaming(uploadCtx, submissionUUID, ext, file, fileHeader.Size)
 	if err != nil {
+		// 检查是否是上下文超时错误
+		if errors.Is(err, context.DeadlineExceeded) {
+			logger.Error().Err(err).Str("submission_uuid", submissionUUID).Msg("流式上传简历到MinIO超时")
+			ctx.JSON(http.StatusGatewayTimeout, map[string]interface{}{"error": "上传到存储服务超时"})
+			return
+		}
+
+		// 其他错误
 		logger.Error().Err(err).Str("submission_uuid", submissionUUID).Msg("流式上传简历到MinIO失败")
 		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "上传简历到MinIO失败"})
 		return
@@ -212,6 +298,10 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 			return false
 		}
 
+		// 为每个消息创建一个独立的上下文，以隔离处理并为未来的追踪传播做准备
+		msgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute) // 为每个消息设置2分钟的超时
+		defer cancel()
+
 		// 新逻辑：调用 Processor 进行处理
 		// 首先，仍然需要将初始提交记录写入数据库，这部分逻辑可以保留在Handler或移至Processor的第一步
 		submission := models.ResumeSubmission{
@@ -223,7 +313,7 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 			SubmissionTimestamp: message.SubmissionTimestamp,
 			ProcessingStatus:    constants.StatusPendingParsing, // 初始状态
 		}
-		if err := h.storage.MySQL.BatchInsertResumeSubmissions(ctx, []models.ResumeSubmission{submission}); err != nil {
+		if err := h.storage.MySQL.BatchInsertResumeSubmissions(msgCtx, []models.ResumeSubmission{submission}); err != nil {
 			logger.Error().Err(err).Str("submission_uuid", message.SubmissionUUID).Msg("插入初始简历提交记录失败")
 
 			// 补偿操作：如果DB插入失败，则从Redis中移除之前添加的MD5，以允许重试
@@ -243,7 +333,7 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 			return false // 插入失败，不继续
 		}
 
-		if err := h.processorModule.ProcessUploadedResume(ctx, message, h.cfg); err != nil {
+		if err := h.processorModule.ProcessUploadedResume(msgCtx, message, h.cfg); err != nil {
 			logger.Error().
 				Err(err).
 				Str("submission_uuid", message.SubmissionUUID).
@@ -307,17 +397,12 @@ func (h *ResumeHandler) StartLLMParsingConsumer(ctx context.Context, prefetchCou
 			return false
 		}
 
-		// 使用协程池处理任务 (旧逻辑)
-		// if err := h.ParallelProcessResumeTask(ctx, message); err != nil {
-		// 	logger.Error().
-		// 		Err(err).
-		// 		Str("submissionUUID", message.SubmissionUUID).
-		// 		Msg("处理简历任务失败")
-		// 	return false
-		// }
+		// 为每个消息创建一个独立的上下文，并设置超时，以隔离处理并防止任务无限期运行
+		msgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute) // LLM处理可能耗时较长，设置5分钟超时
+		defer cancel()
 
 		// 新逻辑: 调用 Processor 进行处理
-		if err := h.processorModule.ProcessLLMTasks(ctx, message, h.cfg); err != nil {
+		if err := h.processorModule.ProcessLLMTasks(msgCtx, message, h.cfg); err != nil {
 			logger.Error().
 				Err(err).
 				Str("submissionUUID", message.SubmissionUUID).

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -93,6 +94,15 @@ func oneTimeSetupFunc(t *testing.T) {
 	testCfg, err = config.LoadConfigFromFileOnly(testConfigPath)
 	require.NoError(t, err, "Failed to load test config from %s", testConfigPath)
 	require.NotNil(t, testCfg, "Test config is nil")
+
+	// 为测试环境强制设置一个严格的MIME类型白名单，以确保测试的确定性
+	// 这避免了因本地 config.yaml 文件包含 "text/plain" 等宽松配置而导致MIME类型测试失败
+	testCfg.Upload.AllowedMIMETypes = []string{
+		"application/pdf",
+		"application/msword",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	}
+	t.Logf("MIME type whitelist for tests has been strictly set to: %v", testCfg.Upload.AllowedMIMETypes)
 
 	testCfg.MinIO.EnableTestLogging = true
 	testCfg.MySQL.LogLevel = 1 // gormLogger.Silent, to suppress GORM logs during NewMySQL's autoMigrate
@@ -351,6 +361,27 @@ func createMultipartForm(t *testing.T, filePath string, targetJobID string, sour
 	require.NoError(t, err)
 	defer file.Close()
 	_, err = io.Copy(part, file)
+	require.NoError(t, err)
+
+	if targetJobID != "" {
+		_ = writer.WriteField("target_job_id", targetJobID)
+	}
+	if sourceChannel != "" {
+		_ = writer.WriteField("source_channel", sourceChannel)
+	}
+	require.NoError(t, writer.Close())
+	return body, writer.FormDataContentType()
+}
+
+// createMultipartFormWithContent 是一个辅助函数，用于通过字节内容而不是文件路径创建 multipart 表单
+func createMultipartFormWithContent(t *testing.T, fileName string, fileContent []byte, targetJobID string, sourceChannel string) (*bytes.Buffer, string) {
+	body := new(bytes.Buffer)
+	writer := multipart.NewWriter(body)
+
+	part, err := writer.CreateFormFile("file", fileName)
+	require.NoError(t, err)
+
+	_, err = io.Copy(part, bytes.NewReader(fileContent))
 	require.NoError(t, err)
 
 	if targetJobID != "" {
@@ -694,6 +725,98 @@ func TestHandleResumeUpload_ConcurrentDuplicateProtection(t *testing.T) {
 
 		t.Logf("--- Finished Cleanup for TestHandleResumeUpload_ConcurrentDuplicateProtection ---")
 	})
+}
+
+func TestHandleResumeUpload_UnsupportedMIMEType(t *testing.T) {
+	oneTimeSetupFunc(t)
+
+	// 将被检测为 text/plain 的内容
+	unsupportedContent := []byte("This is a plain text file, not a supported document type.")
+	fileMD5Hex := utils.CalculateMD5(unsupportedContent)
+	rawFileKey := testStorageManager.Redis.FormatKey(constants.RawFileMD5SetKey)
+	ctx := context.Background()
+
+	// 确保Redis中没有此测试内容的MD5，以防因重复文件导致返回409而不是415
+	isMember, err := testStorageManager.Redis.Client.SIsMember(ctx, rawFileKey, fileMD5Hex).Result()
+	require.NoError(t, err)
+	if isMember {
+		_, err = testStorageManager.Redis.Client.SRem(ctx, rawFileKey, fileMD5Hex).Result()
+		require.NoError(t, err, "Failed to remove pre-existing MD5 for unsupported MIME type test")
+		t.Logf("Removed pre-existing MD5 %s for a clean unsupported MIME type test", fileMD5Hex)
+	}
+
+	// 创建请求
+	body, contentType := createMultipartFormWithContent(t, "test.txt", unsupportedContent, "job-id-unsupported", "test-channel")
+
+	// 执行请求
+	resp := ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
+		&ut.Body{Body: body, Len: body.Len()},
+		ut.Header{Key: "Content-Type", Value: contentType},
+	)
+
+	// 检查响应
+	require.Equal(t, http.StatusUnsupportedMediaType, resp.Code)
+	var errResp map[string]interface{}
+	err = json.Unmarshal(resp.Body.Bytes(), &errResp)
+	require.NoError(t, err)
+	// http.DetectContentType 对 "This is..." 返回 "text/plain; charset=utf-8"
+	// 我们的处理程序现在应该提取并返回基础MIME类型 "text/plain"
+	require.Contains(t, errResp["error"], "不支持的文件类型: text/plain")
+}
+func TestHandleResumeUpload_FileTooLarge(t *testing.T) {
+	oneTimeSetupFunc(t)
+
+	// 1. 使用一个很小的实际内容，以确保如果测试失败，不是因为实际内容过大
+	smallContent := []byte("small content")
+	body, contentType := createMultipartFormWithContent(t, "large_file.pdf", smallContent, "job-id-large", "test-channel")
+
+	// 2. 伪造一个超大的 Content-Length
+	largeSize := int(testCfg.Upload.MaxSizeMB*1024*1024) + 1
+
+	// 3. 执行请求，并显式注入 Content-Length 头
+	resp := ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
+		&ut.Body{Body: body, Len: body.Len()},
+		ut.Header{Key: "Content-Type", Value: contentType},
+		// 关键：显式设置 Content-Length 头来触发服务端的早期校验
+		ut.Header{Key: "Content-Length", Value: strconv.Itoa(largeSize)},
+	)
+
+	// 4. 检查响应
+	require.Equal(t, http.StatusRequestEntityTooLarge, resp.Code)
+	var errResp map[string]interface{}
+	err := json.Unmarshal(resp.Body.Bytes(), &errResp)
+	require.NoError(t, err)
+	require.Contains(t, errResp["error"], fmt.Sprintf("文件大小不能超过 %d MB", testCfg.Upload.MaxSizeMB))
+}
+
+func TestHandleResumeUpload_UploadTimeout(t *testing.T) {
+	oneTimeSetupFunc(t)
+
+	// 1. 设置一个极短的超时时间来触发超时
+	originalTimeout := testCfg.Upload.Timeout
+	testCfg.Upload.Timeout = 1 * time.Millisecond
+	defer func() {
+		// 恢复原始超时时间，避免影响其他测试
+		testCfg.Upload.Timeout = originalTimeout
+	}()
+
+	// 2. 准备一个真实的、但因为超时而无法完成上传的文件
+	testPDFPath := ensureTestPDF(t)
+	body, contentType := createMultipartForm(t, testPDFPath, "job-id-timeout", "test-channel-timeout")
+
+	// 3. 执行请求
+	resp := ut.PerformRequest(testHertzEngine.Engine, "POST", "/api/v1/resume/upload",
+		&ut.Body{Body: body, Len: body.Len()},
+		ut.Header{Key: "Content-Type", Value: contentType},
+	)
+
+	// 4. 检查响应
+	// 预期因为 context deadline exceeded 而返回 504 Gateway Timeout
+	require.Equal(t, http.StatusGatewayTimeout, resp.Code)
+	var errResp map[string]interface{}
+	err := json.Unmarshal(resp.Body.Bytes(), &errResp)
+	require.NoError(t, err)
+	require.Contains(t, errResp["error"], "上传到存储服务超时")
 }
 
 func TestStartResumeUploadConsumer_ProcessMessageSuccess(t *testing.T) {

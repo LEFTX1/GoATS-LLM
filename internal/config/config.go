@@ -64,6 +64,9 @@ type Config struct {
 	// 新增服务器配置
 	Server ServerConfig `yaml:"server"`
 
+	// 新增上传配置
+	Upload UploadConfig `yaml:"upload"`
+
 	// 新增LLM解析器配置
 	LLMParser LLMParserConfig `yaml:"llm_parser"`
 
@@ -165,6 +168,13 @@ type MySQLConfig struct {
 // ServerConfig 定义服务器配置
 type ServerConfig struct {
 	Address string `yaml:"address"` // 例如 ":8080" or "0.0.0.0:8080"
+}
+
+// UploadConfig 定义文件上传的配置
+type UploadConfig struct {
+	MaxSizeMB        int64         `yaml:"max_size_mb"`        // 上传文件大小上限 (MB)
+	AllowedMIMETypes []string      `yaml:"allowed_mime_types"` // 允许的MIME类型列表
+	Timeout          time.Duration `yaml:"timeout"`
 }
 
 // LLMParserConfig 定义LLM解析器的配置
@@ -341,6 +351,22 @@ func LoadConfig(configPath string) (*Config, error) {
 		config.Server.Address = ":8080" // 默认服务器地址
 	}
 
+	// 设置上传默认值
+	if config.Upload.MaxSizeMB == 0 {
+		config.Upload.MaxSizeMB = 10 // 默认10MB
+	}
+	if config.Upload.Timeout == 0 {
+		config.Upload.Timeout = 2 * time.Minute // 默认2分钟
+	}
+	if len(config.Upload.AllowedMIMETypes) == 0 {
+		config.Upload.AllowedMIMETypes = []string{
+			"application/pdf",
+			"application/msword",
+			"application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+			"text/plain",
+		}
+	}
+
 	return &config, nil
 }
 
@@ -387,6 +413,22 @@ func LoadConfigFromFileOnly(configPath string) (*Config, error) {
 	}
 	if config.Aliyun.Embedding.BaseURL == "" {
 		config.Aliyun.Embedding.BaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+	}
+
+	// 设置上传默认值
+	if config.Upload.MaxSizeMB == 0 {
+		config.Upload.MaxSizeMB = 10 // 默认10MB
+	}
+	if config.Upload.Timeout == 0 {
+		config.Upload.Timeout = 2 * time.Minute // 默认2分钟
+	}
+	if len(config.Upload.AllowedMIMETypes) == 0 {
+		config.Upload.AllowedMIMETypes = []string{
+			"application/pdf",
+			"application/msword",
+			"application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+			"text/plain",
+		}
 	}
 
 	return &config, nil
@@ -469,6 +511,16 @@ func createDefaultConfig() *Config {
 	config.Redis.ConnMaxLifetimeMinutes = 60
 	config.Redis.ConnMaxIdleTimeMinutes = 30
 	config.Redis.MD5RecordExpireDays = 365 // 默认1年过期
+
+	// Upload默认配置
+	config.Upload.MaxSizeMB = 10 // 默认10MB
+	config.Upload.Timeout = 2 * time.Minute
+	config.Upload.AllowedMIMETypes = []string{
+		"application/pdf",
+		"application/msword",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+		"text/plain",
+	}
 
 	// Parser Version 默认配置
 	config.ActiveParserVersion = "tika-server-default"
