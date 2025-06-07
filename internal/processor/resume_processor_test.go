@@ -2,6 +2,7 @@ package processor
 
 import (
 	"ai-agent-go/internal/config"
+	"ai-agent-go/internal/constants"
 	"ai-agent-go/internal/parser"
 	"ai-agent-go/internal/storage"
 	storagetypes "ai-agent-go/internal/storage"
@@ -17,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/uuid/v5"
+	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -739,8 +742,9 @@ func TestMQMessageIdempotence(t *testing.T) {
 		}
 	}()
 
-	// 4. 创建测试数据 - 使用固定UUID
-	testSubmissionUUID := "test-mq-idempotence-fixed-uuid"
+	// 4. 创建测试数据 - 使用标准格式的UUID
+	// 使用标准UUID格式，避免 "uuid: incorrect UUID length" 错误
+	testSubmissionUUID := uuid.Must(uuid.NewV4()).String()
 	initialTime := time.Now()
 
 	// 使用静默的DB会话操作
@@ -751,14 +755,24 @@ func TestMQMessageIdempotence(t *testing.T) {
 		),
 	})
 
-	// 5. 创建已处理完成状态的测试记录
+	// 5. 创建解析文本文件，确保能从MinIO读取
+	parsedTextContent := "这是测试用的解析文本内容"
+	parsedTextPath := "test-parsed-" + testSubmissionUUID + ".txt" // 使用UUID创建唯一路径
+
+	// 上传测试文本到MinIO
+	parsedTextPath, err = storageManager.MinIO.UploadParsedText(context.Background(), testSubmissionUUID, parsedTextContent)
+	if err != nil {
+		t.Logf("上传测试解析文本失败: %v - 测试可能会失败", err)
+	}
+
+	// 5b. 创建已处理完成状态的测试记录
 	testSubmission := models.ResumeSubmission{
 		SubmissionUUID:      testSubmissionUUID,
-		ProcessingStatus:    "LLM_PROCESSED", // 已经是完成状态
+		ProcessingStatus:    constants.StatusProcessingCompleted, // 已经是完成状态
 		SubmissionTimestamp: initialTime,
 		OriginalFilename:    "test-idempotence.pdf",
 		OriginalFilePathOSS: "test-path.pdf",
-		ParsedTextPathOSS:   "test-parsed.txt",
+		ParsedTextPathOSS:   parsedTextPath, // 使用实际创建的路径
 		RawTextMD5:          "test-md5-" + time.Now().Format("20060102150405"),
 		CreatedAt:           initialTime,
 		UpdatedAt:           initialTime,
@@ -776,27 +790,71 @@ func TestMQMessageIdempotence(t *testing.T) {
 
 	// 确保测试后删除测试记录
 	defer func() {
+		// 清理数据库记录
 		if storageManager != nil && storageManager.MySQL != nil {
 			err := db.Unscoped().Where("submission_uuid = ?", testSubmissionUUID).
 				Delete(&models.ResumeSubmission{}).Error
 			if err != nil {
-				t.Logf("清理测试数据失败: %v", err)
+				t.Logf("清理数据库测试数据失败: %v", err)
+			}
+		}
+
+		// 清理MinIO对象
+		if storageManager != nil && storageManager.MinIO != nil && parsedTextPath != "" {
+			err := storageManager.MinIO.RemoveObject(context.Background(),
+				cfg.MinIO.ParsedTextBucket, parsedTextPath, minio.RemoveObjectOptions{})
+			if err != nil {
+				t.Logf("清理MinIO测试文件失败: %v", err)
 			}
 		}
 	}()
 
 	// 6. 创建PDF提取器和处理器
 	pdfExtractor := parser.NewTikaPDFExtractor(cfg.Tika.ServerURL)
+
+	// 创建必要的组件
+	mockChunker := &MockResumeChunker{
+		sections: []*types.ResumeSection{
+			{Title: "测试部分", Content: "测试内容"},
+		},
+		basicInfo: map[string]string{"name": "测试用户"},
+	}
+
+	mockEmbedder := &MockResumeEmbedder{
+		vectors: []*types.ResumeChunkVector{
+			{
+				Section:  &types.ResumeSection{Title: "测试部分", Content: "测试内容"},
+				Vector:   make([]float64, 1024), // 创建1024维向量，匹配Qdrant需求
+				Metadata: map[string]interface{}{"name": "测试用户"},
+			},
+		},
+	}
+
+	mockEvaluator := &MockJobMatchEvaluator{
+		evaluation: &types.JobMatchEvaluation{
+			MatchScore:      85,
+			MatchHighlights: []string{"技能匹配"},
+			PotentialGaps:   []string{"经验不足"},
+		},
+	}
+
+	// 创建处理器并提供所有必要的组件
 	processor := NewResumeProcessorV2(
-		&Components{PDFExtractor: pdfExtractor, Storage: storageManager},
+		&Components{
+			PDFExtractor:   pdfExtractor,
+			Storage:        storageManager,
+			ResumeChunker:  mockChunker,
+			ResumeEmbedder: mockEmbedder,
+			MatchEvaluator: mockEvaluator,
+		},
 		&Settings{Debug: true, Logger: log.New(io.Discard, "[TEST] ", log.LstdFlags), TimeLocation: time.Local},
 	)
 
 	// 7. 模拟MQ消息重投 - 创建处理消息
 	message := storagetypes.ResumeProcessingMessage{
 		SubmissionUUID:      testSubmissionUUID,
-		ParsedTextPathOSS:   "test-parsed.txt",
-		ParsedTextObjectKey: "test-parsed.txt",
+		ParsedTextPathOSS:   parsedTextPath,
+		ParsedTextObjectKey: parsedTextPath,
 	}
 
 	// 8. 尝试重复处理
@@ -812,7 +870,7 @@ func TestMQMessageIdempotence(t *testing.T) {
 	require.NoError(t, err, "查询测试记录失败")
 
 	// 9.3 验证状态未变化
-	assert.Equal(t, "LLM_PROCESSED", afterSubmission.ProcessingStatus,
+	assert.Equal(t, constants.StatusProcessingCompleted, afterSubmission.ProcessingStatus,
 		"处理已完成状态的记录后，状态不应变化")
 
 	// 9.4 验证更新时间未被修改（处理被跳过）

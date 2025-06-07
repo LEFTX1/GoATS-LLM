@@ -11,6 +11,7 @@ import (
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -172,7 +173,14 @@ func (m *MySQL) BatchInsertResumeSubmissions(ctx context.Context, submissions []
 	if len(submissions) == 0 {
 		return nil
 	}
-	return m.db.WithContext(ctx).Create(&submissions).Error
+
+	// 使用 GORM 的 Clauses 方法添加 ON DUPLICATE KEY UPDATE 子句
+	// 当遇到主键冲突时，更新一个字段为其自身的值，实现幂等操作
+	return m.db.WithContext(ctx).Clauses(
+		clause.OnConflict{
+			Columns:   []clause.Column{{Name: "submission_uuid"}},            // 主键列
+			DoUpdates: clause.AssignmentColumns([]string{"submission_uuid"}), // 执行无实际意义的更新
+		}).Create(&submissions).Error
 }
 
 // UpdateResumeProcessingStatus 更新简历处理状态

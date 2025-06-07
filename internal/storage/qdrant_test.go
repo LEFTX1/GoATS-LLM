@@ -5,12 +5,12 @@ import (
 	"ai-agent-go/internal/storage"
 	"ai-agent-go/internal/types"
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gofrs/uuid/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,7 +117,16 @@ func TestQdrant_StoreResumeVectors_WithFloat64(t *testing.T) {
 
 	require.NoError(t, err, "向量存储应成功")
 	require.Len(t, pointIDs, 1, "应返回一个点ID")
-	assert.Equal(t, fmt.Sprintf("%s_chunk_%d", resumeID, chunks[0].ChunkID), pointIDs[0], "点ID应符合预期格式")
+
+	// 验证返回的是有效的UUID格式
+	_, uuidErr := uuid.FromString(pointIDs[0])
+	require.NoError(t, uuidErr, "返回的pointID应为有效的UUID格式")
+
+	// 验证多次调用生成的ID一致（确定性ID）
+	pointIDs2, err := client.StoreResumeVectors(ctx, resumeID, chunks, embeddings)
+	require.NoError(t, err, "第二次存储向量应成功")
+	require.Len(t, pointIDs2, 1, "第二次应返回一个点ID")
+	assert.Equal(t, pointIDs[0], pointIDs2[0], "对相同数据的多次操作应生成相同的pointID")
 }
 
 // TestQdrant_SearchSimilarResumes_WithFloat64 测试使用float64类型向量进行搜索
@@ -137,11 +146,11 @@ func TestQdrant_SearchSimilarResumes_WithFloat64(t *testing.T) {
 			w.Write([]byte(`{
 				"result": [
 					{
-						"id": "test-resume-123_chunk_1",
+						"id": "e5f3bbc0-fc9d-5f22-9a84-a501a612d755",
 						"score": 0.95,
 						"payload": {
 							"resume_id": "test-resume-123",
-							"chunk_id": 1,
+							"original_chunk_id": 1,
 							"chunk_type": "summary",
 							"content_preview": "这是一份测试简历",
 							"skills": ["Go", "Python"]
@@ -181,6 +190,15 @@ func TestQdrant_SearchSimilarResumes_WithFloat64(t *testing.T) {
 
 	require.NoError(t, err, "向量搜索应成功")
 	require.Len(t, results, 1, "应返回一个结果")
-	assert.Equal(t, "test-resume-123_chunk_1", results[0].ID, "结果ID应符合预期")
+
+	// 验证返回的是有效的UUID格式
+	_, uuidErr := uuid.FromString(results[0].ID)
+	require.NoError(t, uuidErr, "返回的结果ID应为有效的UUID格式")
+
 	assert.InDelta(t, 0.95, float64(results[0].Score), 0.01, "结果分数应符合预期")
+
+	// 验证payload包含正确的数据
+	assert.Equal(t, "test-resume-123", results[0].Payload["resume_id"], "resume_id应匹配")
+	assert.Equal(t, float64(1), results[0].Payload["original_chunk_id"], "original_chunk_id应匹配")
+	assert.Equal(t, "summary", results[0].Payload["chunk_type"], "chunk_type应匹配")
 }

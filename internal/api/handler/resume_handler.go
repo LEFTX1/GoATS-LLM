@@ -52,7 +52,7 @@ type ResumeUploadResponse struct {
 }
 
 // HandleResumeUpload 处理简历上传请求
-func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestContext) { // c: Go原生上下文, ctx: Hertz框架上下文
+func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestContext) {
 	// 1. 文件大小校验
 	maxUploadSize := h.cfg.Upload.MaxSizeMB * 1024 * 1024 // 从配置读取最大上传大小（MB），并转换为字节
 

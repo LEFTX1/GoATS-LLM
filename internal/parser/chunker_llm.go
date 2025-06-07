@@ -464,8 +464,8 @@ func (c *LLMResumeChunker) callLLM(ctx context.Context, systemContent string, us
 	var response *einoschema.Message
 	var err error
 
-	c.logger.Printf("[LLMResumeChunker] System Prompt: %s", systemContent)
-	c.logger.Printf("[LLMResumeChunker] User Prompt (first 500 chars): %.500s", userContent)
+	c.logger.Printf("[LLMResumeChunker] System Prompt: %.50s...", systemContent)
+	c.logger.Printf("[LLMResumeChunker] User Prompt: %.50s...", userContent)
 
 	// 重试逻辑
 	for retry := 0; retry <= maxRetries; retry++ {
@@ -499,7 +499,7 @@ func (c *LLMResumeChunker) callLLM(ctx context.Context, systemContent string, us
 		}
 	}
 
-	c.logger.Printf("[LLMResumeChunker] LLM Response: %s", response.Content)
+	c.logger.Printf("[LLMResumeChunker] LLM Response: %.50s", response.Content)
 	// 返回响应内容
 	return response.Content, nil
 }

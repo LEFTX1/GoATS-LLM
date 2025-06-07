@@ -6,6 +6,7 @@ import (
 	"ai-agent-go/internal/parser"
 	"ai-agent-go/internal/storage"
 	"ai-agent-go/internal/storage/models"
+	"ai-agent-go/internal/types"
 	"ai-agent-go/pkg/utils"
 	"bytes"
 	"context"
@@ -22,11 +23,17 @@ import (
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/minio/minio-go/v7"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testResumeUUID1 = "1a7e6ea6-1743-4200-a337-14365b2e3532"
+	testResumeUUID2 = "c5b2a1a8-2943-4f3b-8f32-3a5e8d6e1b43"
+)
+
 // TestOutboxPattern_ResumeUploadConsumer_CreatesAndRelaysMessage 对Outbox模式进行端到端集成测试。
-// 它验证了ResumeUploadConsumer在处理消息时，能够通过outbox表可靠地将新消息中继到下一个队列。
+// 验证在完成业务处理后，能够通过数据库事务可靠地创建下一阶段的消息，并由MessageRelay服务成功中继到消息队列。
 func TestOutboxPattern_ResumeUploadConsumer_CreatesAndRelaysMessage(t *testing.T) {
 	oneTimeSetupFunc(t) // 1. 环境准备
 
@@ -197,7 +204,7 @@ func TestOutboxPattern_ResumeUploadConsumer_CreatesAndRelaysMessage(t *testing.T
 	})
 }
 
-// TestResumeUploadConsumer_IdempotencyCheck 测试简历上传消费者的幂等性处理
+// 验证ResumeUploadConsumer的幂等性，确保重复处理相同的消息不会导致状态错误或数据重复。
 func TestResumeUploadConsumer_IdempotencyCheck(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -340,7 +347,7 @@ func TestResumeUploadConsumer_IdempotencyCheck(t *testing.T) {
 	})
 }
 
-// TestLLMParsingConsumer_IdempotencyCheck 测试LLM解析消费者的幂等性
+// 验证LLMParsingConsumer的幂等性，确保重复的LLM处理请求不会创建重复的简历分块或向量数据。
 func TestLLMParsingConsumer_IdempotencyCheck(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -534,5 +541,151 @@ polling1:
 		}
 
 		t.Logf("--- 完成清理 TestLLMParsingConsumer_IdempotencyCheck 测试数据 (%s) ---", submissionUUID)
+	})
+}
+
+// 单元测试验证用于生成Qdrant Point ID的算法（UUIDv5）是否具有确定性。
+func TestQdrantDeterministicIDs(t *testing.T) {
+	oneTimeSetupFunc(t)
+
+	// 创建两个测试用例，使用有效的、固定的UUID作为resumeID
+	resumeID := testResumeUUID1
+	chunkID := 1
+
+	// 第一次生成pointID
+	namespaceUUID, err := uuid.FromString(resumeID)
+	require.NoError(t, err, "从resumeID创建命名空间UUID失败")
+
+	pointID1 := uuid.NewV5(namespaceUUID, fmt.Sprintf("chunk-%d", chunkID)).String()
+	t.Logf("第一次生成的pointID: %s", pointID1)
+
+	// 第二次生成pointID（应该与第一次相同）
+	pointID2 := uuid.NewV5(namespaceUUID, fmt.Sprintf("chunk-%d", chunkID)).String()
+	t.Logf("第二次生成的pointID: %s", pointID2)
+
+	// 验证两次生成的ID相同
+	require.Equal(t, pointID1, pointID2, "确定性ID生成失败：两次生成的ID不相同")
+
+	// 使用不同的chunkID，验证生成不同的pointID
+	differentChunkID := 2
+	differentPointID := uuid.NewV5(namespaceUUID, fmt.Sprintf("chunk-%d", differentChunkID)).String()
+	t.Logf("使用不同chunkID生成的pointID: %s", differentPointID)
+	require.NotEqual(t, pointID1, differentPointID, "不同的chunkID应该生成不同的pointID")
+
+	// 使用不同的resumeID，验证生成不同的pointID
+	differentResumeID := testResumeUUID2
+	differentNamespaceUUID, err := uuid.FromString(differentResumeID)
+	require.NoError(t, err, "从不同的resumeID创建命名空间UUID失败")
+
+	differentResumePointID := uuid.NewV5(differentNamespaceUUID, fmt.Sprintf("chunk-%d", chunkID)).String()
+	t.Logf("使用不同resumeID生成的pointID: %s", differentResumePointID)
+	require.NotEqual(t, pointID1, differentResumePointID, "不同的resumeID应该生成不同的pointID")
+
+	// 验证同一个resumeID的不同操作会产生可预测的ID
+	predictablePointID := uuid.NewV5(namespaceUUID, fmt.Sprintf("chunk-%d", chunkID)).String()
+	require.Equal(t, pointID1, predictablePointID, "对同一数据的操作应该产生可预测的ID")
+}
+
+// 集成测试验证Qdrant存储层在实际存储向量时，能够利用确定性ID生成逻辑，实现幂等存储。
+func TestQdrantDeterministicIDsIntegration(t *testing.T) {
+	oneTimeSetupFunc(t)
+
+	// 跳过测试如果Qdrant客户端不可用
+	if testStorageManager.Qdrant == nil {
+		t.Skip("Qdrant client is nil, skipping integration test")
+	}
+
+	// 创建测试数据
+	resumeID := testResumeUUID1
+	chunks := []types.ResumeChunk{
+		{
+			ChunkID:   1,
+			ChunkType: "summary",
+			Content:   "这是第一个测试块",
+			Metadata: types.ChunkMetadata{
+				ExperienceYears: 5,
+				EducationLevel:  "本科",
+			},
+		},
+		{
+			ChunkID:   2,
+			ChunkType: "experience",
+			Content:   "这是第二个测试块",
+			Metadata: types.ChunkMetadata{
+				ExperienceYears: 5,
+				EducationLevel:  "本科",
+			},
+		},
+	}
+
+	// 创建 1024 维的测试向量
+	dimensions := 1024
+	embeddings := make([][]float64, 2)
+
+	// 第一个向量: 使用重复模式填充 1024 维
+	embeddings[0] = make([]float64, dimensions)
+	for i := 0; i < dimensions; i++ {
+		embeddings[0][i] = 0.1 + 0.01*float64(i%10) // 创建周期性模式以节省代码长度
+	}
+
+	// 第二个向量: 使用不同的重复模式填充 1024 维
+	embeddings[1] = make([]float64, dimensions)
+	for i := 0; i < dimensions; i++ {
+		embeddings[1][i] = 0.6 + 0.01*float64(i%10) // 创建周期性模式以节省代码长度
+	}
+
+	// 第一次存储，获取生成的pointIDs
+	ctx := context.Background()
+	pointIDs1, err := testStorageManager.Qdrant.StoreResumeVectors(ctx, resumeID, chunks, embeddings)
+	require.NoError(t, err, "第一次存储向量应成功")
+	require.Len(t, pointIDs1, 2, "应返回两个pointID")
+
+	t.Logf("第一次存储生成的pointIDs: %v", pointIDs1)
+
+	// 存储相同的数据，验证生成相同的pointIDs
+	pointIDs2, err := testStorageManager.Qdrant.StoreResumeVectors(ctx, resumeID, chunks, embeddings)
+	require.NoError(t, err, "第二次存储向量应成功")
+	require.Len(t, pointIDs2, 2, "应返回两个pointID")
+
+	t.Logf("第二次存储生成的pointIDs: %v", pointIDs2)
+
+	// 验证两次生成的ID相同
+	assert.Equal(t, pointIDs1, pointIDs2, "确定性ID生成失败：两次生成的ID不相同")
+
+	// 验证具体ID是否符合预期格式 (UUIDv5)
+	for i, pointID := range pointIDs1 {
+		// 验证是否为有效的UUID格式
+		_, err := uuid.FromString(pointID)
+		require.NoError(t, err, "pointID应为有效的UUID格式")
+
+		// 验证与chunk信息的关联
+		chunkID := chunks[i].ChunkID
+		t.Logf("Chunk %d 的 pointID: %s", chunkID, pointID)
+	}
+
+	// 使用不同的resumeID，验证生成不同的pointIDs
+	differentResumeID := testResumeUUID2
+	differentPointIDs, err := testStorageManager.Qdrant.StoreResumeVectors(ctx, differentResumeID, chunks, embeddings)
+	require.NoError(t, err, "使用不同resumeID存储向量应成功")
+
+	t.Logf("使用不同resumeID生成的pointIDs: %v", differentPointIDs)
+
+	// 验证不同resumeID生成的pointIDs与原来的不同
+	for i, pointID := range pointIDs1 {
+		assert.NotEqual(t, pointID, differentPointIDs[i], "不同的resumeID应该生成不同的pointID")
+	}
+
+	// 清理测试数据
+	t.Cleanup(func() {
+		// 删除测试过程中创建的所有向量点
+		allPointIDs := append(pointIDs1, differentPointIDs...)
+		if len(allPointIDs) > 0 && testStorageManager.Qdrant != nil {
+			errDel := testStorageManager.Qdrant.DeletePoints(ctx, allPointIDs)
+			if errDel != nil {
+				t.Logf("清理：删除测试点失败: %v", errDel)
+			} else {
+				t.Logf("清理：成功删除 %d 个测试点", len(allPointIDs))
+			}
+		}
 	})
 }

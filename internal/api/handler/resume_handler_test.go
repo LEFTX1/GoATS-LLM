@@ -394,6 +394,7 @@ func createMultipartFormWithContent(t *testing.T, fileName string, fileContent [
 	return body, writer.FormDataContentType()
 }
 
+// 验证系统能否成功接收并处理一个全新的、从未上传过的简历文件。
 func TestHandleResumeUpload_Success_NewFile(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -465,6 +466,7 @@ func TestHandleResumeUpload_Success_NewFile(t *testing.T) {
 	})
 }
 
+// 验证当用户尝试上传一个已经存在于系统中的文件时，系统能正确识别并拒绝该重复请求。
 func TestHandleResumeUpload_DuplicateFile(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -554,7 +556,7 @@ func TestHandleResumeUpload_DuplicateFile(t *testing.T) {
 	})
 }
 
-// TestHandleResumeUpload_ConcurrentDuplicateProtection 测试并发上传相同文件时的原子操作保护
+// 验证系统的重复文件检测机制在面对高并发、同时上传相同文件的情况下，是否具备原子性，确保只有一个请求能成功。
 func TestHandleResumeUpload_ConcurrentDuplicateProtection(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -727,6 +729,7 @@ func TestHandleResumeUpload_ConcurrentDuplicateProtection(t *testing.T) {
 	})
 }
 
+// 验证系统能拒绝不符合预设MIME类型的文件上传。
 func TestHandleResumeUpload_UnsupportedMIMEType(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -763,6 +766,8 @@ func TestHandleResumeUpload_UnsupportedMIMEType(t *testing.T) {
 	// 我们的处理程序现在应该提取并返回基础MIME类型 "text/plain"
 	require.Contains(t, errResp["error"], "不支持的文件类型: text/plain")
 }
+
+// 验证系统能根据配置的最大文件大小限制，拒绝过大的文件上传。
 func TestHandleResumeUpload_FileTooLarge(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -789,6 +794,7 @@ func TestHandleResumeUpload_FileTooLarge(t *testing.T) {
 	require.Contains(t, errResp["error"], fmt.Sprintf("文件大小不能超过 %d MB", testCfg.Upload.MaxSizeMB))
 }
 
+// 验证在文件上传到后端存储（MinIO）的过程中，如果操作超时，系统能够优雅地处理并返回超时错误。
 func TestHandleResumeUpload_UploadTimeout(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -819,6 +825,7 @@ func TestHandleResumeUpload_UploadTimeout(t *testing.T) {
 	require.Contains(t, errResp["error"], "上传到存储服务超时")
 }
 
+// 下载原始文件、提取文本、查重、保存文本，并发布新任务。
 func TestStartResumeUploadConsumer_ProcessMessageSuccess(t *testing.T) {
 	oneTimeSetupFunc(t)
 
@@ -1023,7 +1030,7 @@ verificationLoopEnd:
 	})
 }
 
-// TestStartLLMParsingConsumer_ProcessMessageSuccess tests the LLM parsing consumer.
+// 验证能够正确处理任务：调用LLM解析简历、分块与向量化、并将结果存入数据库和向量数据库。
 func TestStartLLMParsingConsumer_ProcessMessageSuccess(t *testing.T) {
 	oneTimeSetupFunc(t) // Ensures all dependencies are up.
 
@@ -1050,7 +1057,8 @@ func TestStartLLMParsingConsumer_ProcessMessageSuccess(t *testing.T) {
 
 	time.Sleep(3 * time.Second) // Allow consumer to start
 
-	submissionUUID := "test-llm-consum-uuid-" + uuid.Must(uuid.NewV4()).String()[:8]
+	// 使用标准 UUID 格式，避免 "uuid: incorrect UUID length" 错误
+	submissionUUID := uuid.Must(uuid.NewV4()).String()
 	targetJobID := "llm-job-id-" + uuid.Must(uuid.NewV4()).String()[:4]
 	parsedTextContent := "Resume for Test User. Email: test@example.com. Phone: 1234567890. Education: Bachelor's. Experience: 2 years. Skills: Go, Python."
 
