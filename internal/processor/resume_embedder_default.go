@@ -1,9 +1,9 @@
-package processor
+package processor // 定义了简历处理相关的核心逻辑和组件
 
 import ( // 导入所需的包
-	"ai-agent-go/internal/types"
-	"context"
-	"fmt"
+	"ai-agent-go/internal/types" // 导入项目自定义的类型
+	"context"                    // 导入上下文包
+	"fmt"                        // 导入格式化I/O包
 )
 
 // DefaultResumeEmbedder 是 ResumeEmbedder 接口的默认实现。
@@ -12,7 +12,7 @@ type DefaultResumeEmbedder struct { // 定义 DefaultResumeEmbedder 结构体
 }
 
 // NewDefaultResumeEmbedder 创建一个新的 DefaultResumeEmbedder 实例。
-func NewDefaultResumeEmbedder(textEmbedder TextEmbedder) (*DefaultResumeEmbedder, error) { // 定义 NewDefaultResumeEmbedder 函数，接收 TextEmbedder 参数，返回 DefaultResumeEmbedder 指针和错误
+func NewDefaultResumeEmbedder(textEmbedder TextEmbedder) (*DefaultResumeEmbedder, error) { // 函数接收 TextEmbedder 参数，返回 DefaultResumeEmbedder 指针和错误
 	if textEmbedder == nil { // 检查传入的 textEmbedder 是否为 nil
 		return nil, fmt.Errorf("textEmbedder cannot be nil") // 如果为 nil，则返回错误信息
 	}
@@ -21,7 +21,7 @@ func NewDefaultResumeEmbedder(textEmbedder TextEmbedder) (*DefaultResumeEmbedder
 
 // EmbedResumeChunks 实现了 ResumeEmbedder 接口。
 // 它将简历的各个部分和基本信息转换为文本，然后进行嵌入。
-func (dre *DefaultResumeEmbedder) EmbedResumeChunks(ctx context.Context, sections []*types.ResumeSection, basicInfo map[string]string) ([]*types.ResumeChunkVector, error) { // 定义 EmbedResumeChunks 方法，接收上下文、简历分块和基本信息，返回简历块向量切片和错误
+func (dre *DefaultResumeEmbedder) EmbedResumeChunks(ctx context.Context, sections []*types.ResumeSection, basicInfo map[string]string) ([]*types.ResumeChunkVector, error) { // 方法接收上下文、简历分块和基本信息，返回简历块向量切片和错误
 	if dre.textEmbedder == nil { // 检查 DefaultResumeEmbedder 中的 textEmbedder 是否未初始化
 		return nil, fmt.Errorf("textEmbedder is not initialized in DefaultResumeEmbedder") // 如果未初始化，则返回错误信息
 	}
@@ -55,7 +55,7 @@ func (dre *DefaultResumeEmbedder) EmbedResumeChunks(ctx context.Context, section
 
 	embeddings, err := dre.textEmbedder.EmbedStrings(ctx, textsToEmbed) // 调用 textEmbedder 的 EmbedStrings 方法对 textsToEmbed 中的所有文本进行嵌入
 	if err != nil {                                                     // 检查嵌入过程中是否发生错误
-		return nil, fmt.Errorf("embedding texts failed: %w", err) // 如果发生错误，则返回错误信息
+		return nil, fmt.Errorf("embedding texts failed: %w", err) // 如果发生错误，则返回包装后的错误信息
 	}
 
 	if len(embeddings) != len(textsToEmbed) { // 检查返回的嵌入向量数量是否与待嵌入文本数量一致
@@ -88,11 +88,11 @@ func (dre *DefaultResumeEmbedder) EmbedResumeChunks(ctx context.Context, section
 
 		// 将 basicInfo 中的相关信息添加到每个 chunk 的 metadata 中
 		// 这是因为 basicInfo 现在不单独生成向量，但其信息对每个 chunk 都可能有用
-		if basicInfo != nil {
-			for k, v := range basicInfo {
+		if basicInfo != nil { // 如果基本信息不为空
+			for k, v := range basicInfo { // 遍历基本信息
 				// 避免覆盖上面已经从 originalSection 设置的字段，除非特定需要
-				if _, exists := metadata[k]; !exists {
-					metadata[k] = v
+				if _, exists := metadata[k]; !exists { // 如果元数据中不存在该键
+					metadata[k] = v // 则添加
 				}
 			}
 		}

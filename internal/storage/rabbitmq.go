@@ -4,6 +4,7 @@ import (
 	"ai-agent-go/internal/config"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -28,6 +29,12 @@ type MessageQueue interface {
 
 	// BindQueue 绑定队列到交换机
 	BindQueue(queueName, exchangeName, routingKey string) error
+
+	// StartConsumer 启动消费者处理单条消息
+	StartConsumer(queueName string, prefetchCount int, handler func([]byte) bool) (<-chan struct{}, error)
+
+	// StartBatchConsumer 启动消费者处理批量消息
+	StartBatchConsumer(queueName string, batchSize int, batchTimeout time.Duration, prefetchCount int, handler func([]amqp.Delivery) bool) (<-chan struct{}, error)
 
 	// Close 关闭连接
 	Close() error
@@ -291,7 +298,7 @@ func (r *RabbitMQ) PublishJSON(ctx context.Context, exchangeName, routingKey str
 	return r.PublishMessage(ctx, exchangeName, routingKey, jsonData, persistent)
 }
 
-// StartConsumer 启动消费者处理函数
+// StartConsumer 启动消费者处理单条消息
 func (r *RabbitMQ) StartConsumer(queueName string, prefetchCount int, handler func([]byte) bool) (<-chan struct{}, error) {
 	stopCh := make(chan struct{})
 
@@ -349,6 +356,85 @@ func (r *RabbitMQ) StartConsumer(queueName string, prefetchCount int, handler fu
 						log.Printf("拒绝消息失败: %v", err)
 					}
 				}
+			}
+		}
+	}()
+
+	return stopCh, nil
+}
+
+// StartBatchConsumer 启动一个消费者，该消费者会批量处理消息。
+// 它会收集消息直到达到 batchSize 或 batchTimeout，然后将整个批次传递给处理函数。
+// 处理函数负责确认或拒绝整个批次。
+func (r *RabbitMQ) StartBatchConsumer(queueName string, batchSize int, batchTimeout time.Duration, prefetchCount int, handler func([]amqp.Delivery) bool) (<-chan struct{}, error) {
+	ch := r.getChannel()
+	if ch == nil {
+		return nil, errors.New("无法从池中获取channel")
+	}
+
+	if err := ch.Qos(prefetchCount, 0, false); err != nil {
+		r.putChannel(ch)
+		return nil, fmt.Errorf("设置QoS失败: %w", err)
+	}
+
+	msgs, err := ch.Consume(
+		queueName,
+		"",    // consumer
+		false, // auto-ack
+		false, // exclusive
+		false, // no-local
+		false, // no-wait
+		nil,   // args
+	)
+	if err != nil {
+		r.putChannel(ch)
+		return nil, fmt.Errorf("注册消费者失败: %w", err)
+	}
+
+	stopCh := make(chan struct{})
+
+	go func() {
+		defer r.putChannel(ch)
+		defer close(stopCh)
+
+		batch := make([]amqp.Delivery, 0, batchSize)
+		var timeout <-chan time.Time
+
+		processBatch := func() {
+			if len(batch) > 0 {
+				if handler(batch) {
+					// 确认整个批次
+					if err := ch.Ack(batch[len(batch)-1].DeliveryTag, true); err != nil {
+						log.Printf("批量ACK消息失败: %v", err)
+					}
+				} else {
+					// 拒绝整个批次并重新入队
+					if err := ch.Nack(batch[len(batch)-1].DeliveryTag, true, true); err != nil {
+						log.Printf("批量NACK消息失败: %v", err)
+					}
+				}
+				batch = make([]amqp.Delivery, 0, batchSize)
+				timeout = nil
+			}
+		}
+
+		for {
+			select {
+			case d, ok := <-msgs:
+				if !ok {
+					log.Println("RabbitMQ channel 已关闭，正在退出批量消费者...")
+					processBatch() // 处理剩余的消息
+					return
+				}
+				batch = append(batch, d)
+				if len(batch) == 1 {
+					timeout = time.After(batchTimeout)
+				}
+				if len(batch) >= batchSize {
+					processBatch()
+				}
+			case <-timeout:
+				processBatch()
 			}
 		}
 	}()
