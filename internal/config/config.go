@@ -122,6 +122,7 @@ type RabbitMQConfig struct {
 	PrefetchCount            int    `yaml:"prefetch_count"`
 	RetryInterval            string `yaml:"retry_interval"`
 	MaxRetries               int    `yaml:"max_retries"`
+	BatchPrefetchMultiplier  int    `yaml:"batch_prefetch_multiplier"` // 批处理预取倍数，控制batchSize与prefetchCount的比例
 	// 新增消费者工作线程和批量处理超时配置
 	ConsumerWorkers map[string]int    `yaml:"consumer_workers"` // 例如: {"upload_consumer_workers": 5, "llm_consumer_workers": 3}
 	BatchTimeouts   map[string]string `yaml:"batch_timeouts"`   // 例如: {"upload_batch_timeout": "10s"}

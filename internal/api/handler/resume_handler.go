@@ -105,24 +105,28 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	}
 	defer file.Close() // 确保函数结束时关闭文件
 
-	// 2. 文件类型校验 (MIME Sniffing)
-	// 只读取前512字节用于类型检测，避免读取整个大文件到内存
-	buffer := make([]byte, 512)      // 创建一个512字节的缓冲区
-	n, err := file.Read(buffer)      // 读取文件的前512字节
-	if err != nil && err != io.EOF { // 如果读取出错（且不是文件末尾）
-		logger.Error().Err(err).Msg("读取文件头用于MIME检测失败")                                       // 记录错误日志
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "读取文件头失败"}) // 返回500错误
-		return                                                                               // 终止处理
-	}
-	// 将文件指针重置回开头，以便后续流程能读取完整文件
-	if _, err := file.Seek(0, 0); err != nil { // 将文件读写指针移回文件开头
-		logger.Error().Err(err).Msg("重置文件读取指针失败")                                             // 记录错误日志
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "重置文件指针失败"}) // 返回500错误
-		return                                                                                // 终止处理
+	// 优化文件读取：使用TeeReader同时读取文件内容并捕获前512字节用于MIME检测
+	var contentBuffer bytes.Buffer
+	fileBytes, err := io.ReadAll(io.TeeReader(io.LimitReader(file, 512), &contentBuffer))
+	if err != nil && err != io.EOF {
+		logger.Error().Err(err).Msg("读取文件内容失败")
+		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "读取文件内容失败"})
+		return
 	}
 
-	mimeType := http.DetectContentType(buffer[:n]) // 检测文件的MIME类型
-	// 从 "type/subtype; params" 中提取 "type/subtype"，并转为小写以进行不区分大小写的比较
+	// 如果只读取了部分内容（超过512字节的文件），继续读取剩余部分
+	if fileHeader.Size > 512 {
+		remainingBytes, err := io.ReadAll(file)
+		if err != nil {
+			logger.Error().Err(err).Msg("读取文件剩余内容失败")
+			ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "读取文件内容失败"})
+			return
+		}
+		fileBytes = append(fileBytes, remainingBytes...)
+	}
+
+	// 使用前512字节进行MIME类型检测
+	mimeType := http.DetectContentType(contentBuffer.Bytes())
 	baseMimeType, _, _ := strings.Cut(mimeType, ";")                // 切割MIME类型字符串，去掉参数部分
 	baseMimeType = strings.TrimSpace(strings.ToLower(baseMimeType)) // 转换为小写并去除首尾空格
 
@@ -153,6 +157,10 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	}
 	submissionUUID := uuidV7.String() // 将UUID转换为字符串
 
+	// 创建带有submissionUUID的上下文
+	c = logger.WithSubmissionUUID(c, submissionUUID)
+	logCtx := logger.FromContext(c)
+
 	// 2. 获取文件扩展名
 	ext := filepath.Ext(fileHeader.Filename) // 从文件名中提取扩展名
 	if ext == "" {                           // 如果文件没有扩展名
@@ -162,20 +170,12 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	// 优化：先计算MD5进行去重，再上传到MinIO，以节省带宽和存储
 	// 将文件内容读入内存以计算MD5。基于配置中的MaxSizeMB，这在可接受的范围内。
 	// MIME检测后，文件指针已重置到开头
-	fileBytes, err := io.ReadAll(file)
-	if err != nil {
-		logger.Error().Err(err).Msg("读取上传文件内容以计算MD5失败")
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "读取文件内容失败"})
-		return
-	}
-	file.Close() // 文件内容已在内存中，可以立即关闭文件句柄
-
 	fileMD5Hex := utils.CalculateMD5(fileBytes)
 
 	// 4. 使用原子操作检查并添加文件MD5，用于文件去重
 	exists, err := h.storage.Redis.CheckAndAddRawFileMD5(c, fileMD5Hex) // 在Redis中检查MD5是否存在，如果不存在则添加
 	if err != nil {                                                     // 如果Redis操作失败
-		logger.Error().
+		logCtx.Error().
 			Err(err).
 			Str("md5", fileMD5Hex).
 			Msg("检查并添加文件MD5失败")
@@ -184,7 +184,7 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	}
 
 	if exists { // 如果文件MD5已存在，说明是重复文件
-		logger.Info().
+		logCtx.Info().
 			Str("md5", fileMD5Hex).
 			Str("filename", fileHeader.Filename).
 			Msg("检测到重复的文件MD5，跳过处理")
@@ -210,15 +210,15 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 	if err != nil {                                                                                                                               // 如果上传失败
 		// 检查是否是上下文超时错误
 		if errors.Is(err, context.DeadlineExceeded) { // 如果错误是由于上下文超时引起的
-			logger.Error().Err(err).Str(constants.LogKeySubmissionUUID, submissionUUID).Msg("上传简历到MinIO超时") // 记录超时错误日志
-			ctx.JSON(http.StatusGatewayTimeout, map[string]interface{}{"error": "上传到存储服务超时"})               // 返回504网关超时错误
-			return                                                                                          // 终止处理
+			logCtx.Error().Err(err).Msg("上传简历到MinIO超时")                                       // 使用上下文日志（已包含submissionUUID）
+			ctx.JSON(http.StatusGatewayTimeout, map[string]interface{}{"error": "上传到存储服务超时"}) // 返回504网关超时错误
+			return                                                                            // 终止处理
 		}
 
 		// 其他错误
-		logger.Error().Err(err).Str(constants.LogKeySubmissionUUID, submissionUUID).Msg("上传简历到MinIO失败") // 记录其他上传错误日志
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "上传简历到MinIO失败"})       // 返回500内部服务器错误
-		return                                                                                          // 终止处理
+		logCtx.Error().Err(err).Msg("上传简历到MinIO失败")                                               // 使用上下文日志
+		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "上传简历到MinIO失败"}) // 返回500内部服务器错误
+		return                                                                                    // 终止处理
 	}
 
 	// 5. 构建消息并发送到RabbitMQ，以进行异步处理
@@ -244,9 +244,9 @@ func (h *ResumeHandler) HandleResumeUpload(c context.Context, ctx *app.RequestCo
 		true,                                // 设置消息为持久化，防止MQ服务重启时丢失
 	)
 	if err != nil { // 如果发布失败
-		logger.Error().Err(err).Str(constants.LogKeySubmissionUUID, submissionUUID).Msg("发布消息到RabbitMQ失败") // 记录错误日志
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "发布消息到RabbitMQ失败"})       // 返回500错误
-		return                                                                                             // 终止处理
+		logCtx.Error().Err(err).Msg("发布消息到RabbitMQ失败")                                               // 使用上下文日志记录错误
+		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "发布消息到RabbitMQ失败"}) // 返回500错误
+		return                                                                                       // 终止处理
 	}
 
 	// 6. 返回响应
@@ -292,7 +292,11 @@ func (h *ResumeHandler) StartResumeUploadConsumer(ctx context.Context, batchSize
 		Msg("简历上传批量消费者就绪")
 
 	// 启动批量消费者
-	prefetchCount := batchSize * 2 // 预取数量可以设为批处理大小的倍数
+	prefetchMultiplier := h.cfg.RabbitMQ.BatchPrefetchMultiplier
+	if prefetchMultiplier <= 0 {
+		prefetchMultiplier = 2 // 默认值
+	}
+	prefetchCount := batchSize * prefetchMultiplier
 	_, err := h.storage.RabbitMQ.StartBatchConsumer(h.cfg.RabbitMQ.RawResumeQueue, batchSize, batchTimeout, prefetchCount, func(deliveries []amqp091.Delivery) bool {
 		submissions := make([]models.ResumeSubmission, 0, len(deliveries))
 		messages := make([]storage2.ResumeUploadMessage, 0, len(deliveries))

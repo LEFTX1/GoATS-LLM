@@ -99,3 +99,18 @@ func Ctx(ctx context.Context) *zerolog.Logger {
 func WithContext(ctx context.Context) context.Context {
 	return Logger.WithContext(ctx) // 返回一个包含了该logger的新context
 }
+
+// WithSubmissionUUID 创建一个包含submission_uuid的日志上下文
+func WithSubmissionUUID(ctx context.Context, submissionUUID string) context.Context {
+	logger := zerolog.Ctx(ctx).With().Str("submission_uuid", submissionUUID).Logger()
+	return logger.WithContext(ctx)
+}
+
+// FromContext 从上下文获取日志记录器，如果不存在则返回全局日志记录器
+func FromContext(ctx context.Context) *zerolog.Logger {
+	logger := zerolog.Ctx(ctx)
+	if logger.GetLevel() == zerolog.Disabled {
+		return &Logger
+	}
+	return logger
+}
