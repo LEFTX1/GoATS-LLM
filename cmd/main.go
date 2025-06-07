@@ -89,27 +89,17 @@ func main() {
 	llmChatModel = &processor.MockLLMModel{} // Fallback to mock model
 	glog.Info("MockLLMModel 初始化成功 (用于替换Eino LLM)")
 
-	var pdfExtractor processor.PDFExtractor
+	// 使用统一的PDF解析器构建函数
+	loggerProvider := func(prefix string) *log.Logger {
+		return log.New(appCoreLogger.Logger, prefix, log.LstdFlags)
+	}
+	pdfExtractor, err := processor.BuildPDFExtractor(ctx, cfg, loggerProvider)
+	if err != nil {
+		glog.Fatalf("创建PDF提取器失败: %v", err)
+	}
 	if cfg.Tika.Type == "tika" && cfg.Tika.ServerURL != "" {
-		var tikaOptions []parser.TikaOption
-		if cfg.Tika.MetadataMode == "full" {
-			tikaOptions = append(tikaOptions, parser.WithFullMetadata(true))
-		} else if cfg.Tika.MetadataMode == "none" {
-			tikaOptions = append(tikaOptions, parser.WithMinimalMetadata(false), parser.WithFullMetadata(false))
-		} else { // "minimal" or default
-			tikaOptions = append(tikaOptions, parser.WithMinimalMetadata(true))
-		}
-		if cfg.Tika.Timeout > 0 {
-			tikaOptions = append(tikaOptions, parser.WithTimeout(time.Duration(cfg.Tika.Timeout)*time.Second))
-		}
-		tikaOptions = append(tikaOptions, parser.WithTikaLogger(log.New(os.Stderr, "[TikaPDFMain] ", log.LstdFlags)))
-		pdfExtractor = parser.NewTikaPDFExtractor(cfg.Tika.ServerURL, tikaOptions...)
 		glog.Info("使用Tika PDF解析器")
 	} else {
-		pdfExtractor, err = parser.NewEinoPDFTextExtractor(ctx, parser.WithEinoLogger(log.New(os.Stderr, "[EinoPDFMain] ", log.LstdFlags)))
-		if err != nil {
-			glog.Fatalf("创建Eino PDF提取器失败: %v", err)
-		}
 		glog.Info("使用Eino PDF解析器")
 	}
 

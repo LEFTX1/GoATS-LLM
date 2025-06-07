@@ -172,6 +172,41 @@ func (rp *ResumeProcessor) LogDebug(message string) {
 	}
 }
 
+// 新增统一的日志包装方法
+// logDebug 记录调试级别日志
+func (rp *ResumeProcessor) logDebug(format string, args ...interface{}) {
+	if rp.Config.Debug && rp.Config.Logger != nil {
+		rp.Config.Logger.Printf(format, args...)
+	}
+}
+
+// logInfo 记录信息级别日志
+func (rp *ResumeProcessor) logInfo(format string, args ...interface{}) {
+	if rp.Config.Logger != nil {
+		rp.Config.Logger.Printf(format, args...)
+	}
+}
+
+// logWarn 记录警告级别日志
+func (rp *ResumeProcessor) logWarn(format string, args ...interface{}) {
+	if rp.Config.Logger != nil {
+		rp.Config.Logger.Printf("[WARN] "+format, args...)
+	}
+}
+
+// logError 记录错误级别日志
+func (rp *ResumeProcessor) logError(err error, format string, args ...interface{}) {
+	if rp.Config.Logger != nil {
+		// 如果提供了错误对象，先添加错误信息
+		if err != nil {
+			format = fmt.Sprintf("ERROR: %v - %s", err, format)
+		} else {
+			format = "ERROR: " + format
+		}
+		rp.Config.Logger.Printf(format, args...)
+	}
+}
+
 // 示例使用 V2 API：
 //
 // 在 main.go 或初始化代码中:
@@ -240,32 +275,13 @@ func CreateDefaultProcessor(ctx context.Context, cfg *config.Config, storageMana
 	}
 
 	// 3. 创建PDF提取器
-	var err error // 声明错误变量
-
-	if cfg != nil && cfg.Tika.ServerURL != "" && cfg.Tika.Type == "tika" { // 如果配置存在且指定使用Tika
-		var tikaOptions []parser2.TikaOption // 创建Tika选项切片
-		if cfg.Tika.MetadataMode == "full" { // 如果元数据模式为full
-			tikaOptions = append(tikaOptions, parser2.WithFullMetadata(true)) // 添加完整元数据选项
-		} else if cfg.Tika.MetadataMode == "none" { // 如果为none
-			tikaOptions = append(tikaOptions, parser2.WithMinimalMetadata(false), parser2.WithFullMetadata(false)) // 不添加元数据
-		} else { // "minimal" or default
-			tikaOptions = append(tikaOptions, parser2.WithMinimalMetadata(true)) // 默认使用最小元数据
-		}
-		if cfg.Tika.Timeout > 0 { // 如果配置了超时
-			tikaOptions = append(tikaOptions, parser2.WithTimeout(time.Duration(cfg.Tika.Timeout)*time.Second)) // 添加超时选项
-		}
-		tikaOptions = append(tikaOptions, parser2.WithTikaLogger(log.New(os.Stderr, "[TikaPDFDefault] ", log.LstdFlags))) // 添加Tika logger选项
-		components.PDFExtractor = parser2.NewTikaPDFExtractor(cfg.Tika.ServerURL, tikaOptions...)                         // 创建Tika PDF提取器
-		log.Printf("默认使用Tika PDF解析器 (模式: %s), Tika Server: %s", cfg.Tika.MetadataMode, cfg.Tika.ServerURL)
-	} else { // 否则
-		// Fallback to Eino if Tika is not configured or type is not tika
-		components.PDFExtractor, err = parser2.NewEinoPDFTextExtractor(ctx, // 回退使用Eino
-			parser2.WithEinoLogger(log.New(os.Stderr, "[EinoPDFDefault] ", log.LstdFlags)), // 添加Eino logger选项
-		)
-		if err != nil { // 如果创建失败
-			return nil, fmt.Errorf("创建Eino PDF提取器失败: %w", err) // 返回错误
-		}
-		log.Println("默认使用Eino PDF解析器 (Tika未配置或类型不匹配)")
+	var err error
+	// 使用统一的PDF解析器构建函数
+	components.PDFExtractor, err = BuildPDFExtractor(ctx, cfg, func(prefix string) *log.Logger {
+		return log.New(os.Stdout, prefix, log.LstdFlags)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("创建PDF提取器失败: %w", err)
 	}
 
 	// 4. 创建mock LLM模型
@@ -302,37 +318,13 @@ func CreateProcessorFromConfig(ctx context.Context, cfg *config.Config, storageM
 	}
 
 	// 3. 根据配置创建PDF提取器
-	var err error // 声明错误变量
-
-	// 根据配置选择PDF提取器
-	if cfg.Tika.Type == "tika" && cfg.Tika.ServerURL != "" { // 如果配置类型为tika且URL不为空
-		var tikaOptions []parser2.TikaOption // 创建Tika选项切片
-		if cfg.Tika.MetadataMode == "full" { // 如果元数据模式为full
-			tikaOptions = append(tikaOptions, parser2.WithFullMetadata(true)) // 添加完整元数据选项
-		} else if cfg.Tika.MetadataMode == "none" { // 如果为none
-			tikaOptions = append(tikaOptions, parser2.WithMinimalMetadata(false), parser2.WithFullMetadata(false)) // 不添加元数据
-		} else { // "minimal" or default
-			tikaOptions = append(tikaOptions, parser2.WithMinimalMetadata(true)) // 默认使用最小元数据
-		}
-		if cfg.Tika.Timeout > 0 { // 如果配置了超时
-			tikaOptions = append(tikaOptions, parser2.WithTimeout(time.Duration(cfg.Tika.Timeout)*time.Second)) // 添加超时选项
-		}
-		tikaOptions = append(tikaOptions, parser2.WithTikaLogger(log.New(os.Stderr, "[TikaPDFConfig] ", log.LstdFlags))) // 添加Tika logger
-		components.PDFExtractor = parser2.NewTikaPDFExtractor(cfg.Tika.ServerURL, tikaOptions...)                        // 创建Tika PDF提取器
-		log.Printf("使用Tika PDF解析器 (模式: %s), Tika Server: %s", cfg.Tika.MetadataMode, cfg.Tika.ServerURL)
-	} else if cfg.Tika.Type == "eino" { // 如果配置类型为eino
-		components.PDFExtractor, err = parser2.NewEinoPDFTextExtractor(ctx, parser2.WithEinoLogger(log.New(os.Stderr, "[EinoPDFConfig] ", log.LstdFlags))) // 创建Eino PDF提取器
-		if err != nil {                                                                                                                                    // 如果创建失败
-			return nil, fmt.Errorf("创建Eino PDF提取器失败: %w", err) // 返回错误
-		}
-		log.Println("使用Eino PDF解析器")
-	} else { // 否则
-		// 默认回退到Eino
-		log.Printf("未知的PDF解析器类型 '%s' 或Tika配置不完整, 回退到Eino PDF解析器", cfg.Tika.Type)
-		components.PDFExtractor, err = parser2.NewEinoPDFTextExtractor(ctx, parser2.WithEinoLogger(log.New(os.Stderr, "[EinoPDFFallback] ", log.LstdFlags))) // 创建回退的Eino提取器
-		if err != nil {                                                                                                                                      // 如果创建失败
-			return nil, fmt.Errorf("创建回退Eino PDF提取器失败: %w", err) // 返回错误
-		}
+	var err error
+	// 使用统一的PDF解析器构建函数
+	components.PDFExtractor, err = BuildPDFExtractor(ctx, cfg, func(prefix string) *log.Logger {
+		return log.New(os.Stdout, prefix, log.LstdFlags)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("创建PDF提取器失败: %w", err)
 	}
 
 	// 4. 创建处理器
@@ -453,7 +445,7 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 		if err := tx.Model(&models.ResumeSubmission{}).
 			Where("submission_uuid = ?", message.SubmissionUUID).
 			Update("processing_status", constants.StatusPendingParsing).Error; err != nil {
-			rp.LogDebug(fmt.Sprintf("更新简历 %s 状态为 %s 失败: %v", message.SubmissionUUID, constants.StatusPendingParsing, err))
+			rp.logDebug("更新简历 %s 状态为 %s 失败: %v", message.SubmissionUUID, constants.StatusPendingParsing, err)
 			return NewUpdateError(message.SubmissionUUID, fmt.Sprintf("更新状态为%s失败", constants.StatusPendingParsing))
 		}
 
@@ -469,10 +461,10 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 		// 3. 上传解析后的文本到MinIO
 		textObjectKey, err := rp.Storage.MinIO.UploadParsedText(ctx, message.SubmissionUUID, text) // 上传文本
 		if err != nil {                                                                            // 如果上传失败
-			rp.LogDebug(fmt.Sprintf("上传解析后的文本到MinIO失败 (简历 %s): %v", message.SubmissionUUID, err))
+			rp.logDebug("上传解析后的文本到MinIO失败 (简历 %s): %v", message.SubmissionUUID, err)
 			return NewStoreError(message.SubmissionUUID, err.Error()) // 返回存储错误
 		}
-		rp.LogDebug(fmt.Sprintf("简历 %s 的解析文本已上传到MinIO: %s", message.SubmissionUUID, textObjectKey))
+		rp.logDebug("简历 %s 的解析文本已上传到MinIO: %s", message.SubmissionUUID, textObjectKey)
 
 		// 4. 构建下一个队列的消息
 		processingMessage := storagetypes.ResumeProcessingMessage{
@@ -485,7 +477,7 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 		// 5. [Outbox] 将消息写入 Outbox 表，而不是直接发布
 		payloadBytes, err := json.Marshal(processingMessage) // 序列化消息为JSON
 		if err != nil {                                      // 如果序列化失败
-			rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 序列化 outbox payload 失败 for %s: %v", message.SubmissionUUID, err))
+			rp.logDebug("ProcessUploadedResume: 序列化 outbox payload 失败 for %s: %v", message.SubmissionUUID, err)
 			return NewUpdateError(message.SubmissionUUID, "序列化 outbox payload 失败") // 返回更新错误
 		}
 
@@ -498,10 +490,10 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 		}
 
 		if err := tx.Create(&outboxEntry).Error; err != nil { // 在事务中创建发件箱记录
-			rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 插入 outbox 记录失败 for %s: %v", message.SubmissionUUID, err))
+			rp.logDebug("ProcessUploadedResume: 插入 outbox 记录失败 for %s: %v", message.SubmissionUUID, err)
 			return NewUpdateError(message.SubmissionUUID, "插入 outbox 记录失败") // 返回更新错误
 		}
-		rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 成功为 %s 创建 outbox 记录", message.SubmissionUUID))
+		rp.logDebug("ProcessUploadedResume: 成功为 %s 创建 outbox 记录", message.SubmissionUUID)
 
 		// 6. 更新数据库记录
 		if err := tx.Model(&models.ResumeSubmission{}).
@@ -512,7 +504,7 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 				"processing_status":    constants.StatusQueuedForLLM, // 状态更新为排队等待LLM处理
 				"parser_version":       cfg.ActiveParserVersion,      // 解析器版本
 			}).Error; err != nil {
-			rp.LogDebug(fmt.Sprintf("更新简历 %s 数据库记录失败: %v", message.SubmissionUUID, err))
+			rp.logDebug("更新简历 %s 数据库记录失败: %v", message.SubmissionUUID, err)
 			return NewUpdateError(message.SubmissionUUID, "更新数据库失败") // 返回更新错误
 		}
 
@@ -522,12 +514,12 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 	if err != nil { // 如果事务执行过程中发生错误
 		updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusUploadProcessingFailed) // 更新状态为上传处理失败
 		if updateErr != nil {                                                                                                           // 如果更新状态也失败了
-			rp.LogDebug(fmt.Sprintf("在事务失败后更新状态为失败时出错 (简历 %s): %v", message.SubmissionUUID, updateErr)) // 记录日志
+			rp.logDebug("在事务失败后更新状态为失败时出错 (简历 %s): %v", message.SubmissionUUID, updateErr) // 记录日志
 		}
 		return err // 返回原始错误
 	}
 
-	rp.LogDebug(fmt.Sprintf("上传任务 (简历 %s) 的处理已成功完成。", message.SubmissionUUID))
+	rp.logDebug("上传任务 (简历 %s) 的处理已成功完成。", message.SubmissionUUID)
 	return nil // 所有操作成功，返回nil
 }
 
@@ -536,39 +528,39 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 func (rp *ResumeProcessor) _parseAndDeduplicateResume(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeUploadMessage) (string, string, error) { // 解析和去重简历的内部辅助函数
 	originalFileBytes, err := rp.Storage.MinIO.GetResumeFile(ctx, message.OriginalFilePathOSS) // 从MinIO获取原始简历文件
 	if err != nil {                                                                            // 如果获取失败
-		rp.LogDebug(fmt.Sprintf("从MinIO下载简历 %s 失败: %v", message.SubmissionUUID, err))
+		rp.logDebug("从MinIO下载简历 %s 失败: %v", message.SubmissionUUID, err)
 		return "", "", NewDownloadError(message.SubmissionUUID, err.Error()) // 返回下载错误
 	}
-	rp.LogDebug(fmt.Sprintf("简历 %s 从MinIO下载成功，大小: %d bytes", message.SubmissionUUID, len(originalFileBytes)))
+	rp.logDebug("简历 %s 从MinIO下载成功，大小: %d bytes", message.SubmissionUUID, len(originalFileBytes))
 
 	text, _, err := rp.PDFExtractor.ExtractTextFromReader(ctx, bytes.NewReader(originalFileBytes), message.OriginalFilePathOSS, nil) // 从文件字节流中提取文本
 	if err != nil {                                                                                                                  // 如果提取失败
-		rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 提取简历文本失败 for %s: %v", message.SubmissionUUID, err))
+		rp.logDebug("ProcessUploadedResume: 提取简历文本失败 for %s: %v", message.SubmissionUUID, err)
 		return "", "", NewParseError(message.SubmissionUUID, err.Error()) // 返回解析错误
 	}
-	rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 成功提取文本 for %s, 长度: %d", message.SubmissionUUID, len(text)))
+	rp.logDebug("ProcessUploadedResume: 成功提取文本 for %s, 长度: %d", message.SubmissionUUID, len(text))
 
 	textMD5Hex := utils.CalculateMD5([]byte(text)) // 计算提取出文本的MD5值
-	rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 计算得到文本MD5 %s for %s", textMD5Hex, message.SubmissionUUID))
+	rp.logDebug("ProcessUploadedResume: 计算得到文本MD5 %s for %s", textMD5Hex, message.SubmissionUUID)
 
 	textExists, err := rp.Storage.Redis.CheckAndAddParsedTextMD5(ctx, textMD5Hex) // 在Redis中原子地检查并添加文本MD5
 	if err != nil {                                                               // 如果Redis操作失败
-		rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 使用Redis原子操作检查文本MD5失败 for %s: %v, 将继续处理，但文本去重可能失效", message.SubmissionUUID, err))
+		rp.logDebug("ProcessUploadedResume: 使用Redis原子操作检查文本MD5失败 for %s: %v, 将继续处理，但文本去重可能失效", message.SubmissionUUID, err)
 	} else if textExists { // 如果文本已存在
-		rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 检测到重复的文本MD5 %s for %s，标记为重复内容", textMD5Hex, message.SubmissionUUID))
+		rp.logDebug("ProcessUploadedResume: 检测到重复的文本MD5 %s for %s，标记为重复内容", textMD5Hex, message.SubmissionUUID)
 		if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Update("processing_status", constants.StatusContentDuplicateSkipped).Error; err != nil { // 更新数据库状态为内容重复跳过
 			return "", "", NewUpdateError(message.SubmissionUUID, "更新重复内容状态失败") // 返回更新错误
 		}
 		return "", "", ErrDuplicateContent // 返回内容重复的特定错误
 	}
-	rp.LogDebug(fmt.Sprintf("ProcessUploadedResume: 文本MD5 %s 不存在于Redis, 继续处理 for %s", textMD5Hex, message.SubmissionUUID))
+	rp.logDebug("ProcessUploadedResume: 文本MD5 %s 不存在于Redis, 继续处理 for %s", textMD5Hex, message.SubmissionUUID)
 	return text, textMD5Hex, nil // 返回提取的文本、其MD5和nil错误
 }
 
 // ProcessLLMTasks 接收LLM处理消息，完成分块、评估、存储向量和结果的完整流程
 // 使用数据库事务确保所有状态更新的原子性
 func (rp *ResumeProcessor) ProcessLLMTasks(ctx context.Context, message storagetypes.ResumeProcessingMessage, cfg *config.Config) error {
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 开始处理LLM任务 for %s, 目标Job ID: %s", message.SubmissionUUID, message.TargetJobID))
+	rp.logDebug("[ProcessLLMTasks] 开始处理LLM任务 for %s, 目标Job ID: %s", message.SubmissionUUID, message.TargetJobID)
 
 	// 使用事务来保证读取-更新的原子性和幂等性
 	err := rp.Storage.MySQL.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error { // 开启数据库事务
@@ -579,108 +571,131 @@ func (rp *ResumeProcessor) ProcessLLMTasks(ctx context.Context, message storaget
 										First(&submission).Error; err != nil { // 根据UUID查找记录
 
 			if errors.Is(err, gorm.ErrRecordNotFound) { // 如果记录未找到
-				rp.Config.Logger.Printf("ProcessLLMTasks: ResumeSubmission 记录未找到 for %s: %v", message.SubmissionUUID, err)
+				rp.logInfo("ProcessLLMTasks: ResumeSubmission 记录未找到 for %s: %v", message.SubmissionUUID, err)
 				// 记录不存在，可能已被删除，直接确认消息
 				return nil
 			}
-			rp.Config.Logger.Printf("ProcessLLMTasks: 获取 ResumeSubmission 记录失败 for %s: %v", message.SubmissionUUID, err)
+			rp.logInfo("ProcessLLMTasks: 获取 ResumeSubmission 记录失败 for %s: %v", message.SubmissionUUID, err)
 			return fmt.Errorf("获取 ResumeSubmission 记录失败: %w", err)
 		}
 
 		// 2. 关键的幂等性检查
-		// 只有处于这些状态才应该被处理
-		allowedStatuses := map[string]bool{ // 定义允许处理的状态
-			constants.StatusQueuedForLLM:           true,
-			constants.StatusLLMProcessingFailed:    true,
-			constants.StatusChunkingFailed:         true,
-			constants.StatusVectorizationFailed:    true,
-			constants.StatusQdrantStoreFailed:      true, // 新增可重试状态
-			constants.StatusUploadProcessingFailed: true, // 也可能是入口状态
-		}
-		if !allowedStatuses[submission.ProcessingStatus] { // 如果当前状态不被允许
-			rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 跳过重复/无效状态的消息 for %s, 当前状态: %s", message.SubmissionUUID, submission.ProcessingStatus))
+		// 使用常量集替代内联的状态检查
+		if !constants.IsStatusAllowed(submission.ProcessingStatus, constants.AllowedStatusesForLLM) {
+			rp.logDebug("[ProcessLLMTasks] 跳过重复/无效状态的消息 for %s, 当前状态: %s", message.SubmissionUUID, submission.ProcessingStatus)
 			return nil // 状态不匹配，说明是重复消息或已处理，直接确认并返回
 		}
 
 		// 3. 更新状态为 PENDING_LLM，表示开始处理
 		if err := tx.Model(&submission).Update("processing_status", constants.StatusPendingLLM).Error; err != nil {
-			rp.Config.Logger.Printf("ProcessLLMTasks: 更新状态到 PENDING_LLM 失败 for %s: %v", message.SubmissionUUID, err)
+			rp.logInfo("ProcessLLMTasks: 更新状态到 PENDING_LLM 失败 for %s: %v", message.SubmissionUUID, err)
 			return err
 		}
 
-		// ---- 以下为非事务性操作 ----
-		// 下载、分块、向量化等CPU密集或I/O密集操作在事务外执行，以减少锁持有时间
-		// 这里的设计做一个调整：将这些操作放在事务之前，如果失败了，就不开启事务
-
-		// --- 事务外执行 ---
-		parsedText, sections, basicInfo, err := rp._downloadAndChunkResume(ctx, message) // 下载并分块简历
-		if err != nil {                                                                  // 如果失败
-			// 如果这些步骤失败，需要更新数据库状态为失败
-			updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusChunkingFailed) // 更新状态为分块失败
-			if updateErr != nil {                                                                                                   // 如果更新状态也失败
-				rp.Config.Logger.Printf("更新状态为 CHUNKING_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
-			}
-			return err // 返回错误，消息将被nack
-		}
-
-		chunkEmbeddings, err := rp._embedChunks(ctx, sections, basicInfo) // 对分块进行向量化
-		if err != nil {                                                   // 如果失败
-			updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusVectorizationFailed) // 更新状态为向量化失败
-			if updateErr != nil {                                                                                                        // 如果更新状态也失败
-				rp.Config.Logger.Printf("更新状态为 VECTORIZATION_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
-			}
-			return err // 返回错误，消息将被nack
-		}
-
-		qdrantChunks, floatEmbeddings, err := rp._prepareQdrantData(message.SubmissionUUID, sections, basicInfo, chunkEmbeddings) // 准备用于Qdrant的数据
-		if err != nil {                                                                                                           // 如果失败
-			return err // 返回错误
-		}
-
-		// --- 重新进入事务，执行数据库写操作 ---
-		return rp._executeLLMProcessingTransaction(ctx, tx, message, qdrantChunks, floatEmbeddings, sections, basicInfo, parsedText) // 执行LLM处理的数据库事务
+		return nil // 事务成功提交
 	})
 
-	if err != nil { // 如果事务外的失败或事务提交失败
+	if err != nil { // 如果开始处理的事务失败
+		return err // 直接返回错误
+	}
+
+	// --- 事务外执行IO操作 (下载文本，LLM分块，向量化，写入Qdrant) ---
+	parsedText, sections, basicInfo, err := rp._downloadAndChunkResume(ctx, message)
+	if err != nil { // 如果下载或分块失败
+		updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusChunkingFailed) // 更新状态为分块失败
+		if updateErr != nil {                                                                                                   // 如果更新状态也失败
+			rp.logInfo("更新状态为 CHUNKING_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
+		}
+		return err // 返回错误，消息将被nack
+	}
+
+	// 向量化
+	chunkEmbeddings, err := rp._embedChunks(ctx, sections, basicInfo)
+	if err != nil { // 如果向量化失败
+		updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusVectorizationFailed) // 更新状态为向量化失败
+		if updateErr != nil {                                                                                                        // 如果更新状态也失败
+			rp.logInfo("更新状态为 VECTORIZATION_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
+		}
+		return err // 返回错误，消息将被nack
+	}
+
+	// 准备Qdrant数据
+	qdrantChunks, floatEmbeddings, err := rp._prepareQdrantData(message.SubmissionUUID, sections, basicInfo, chunkEmbeddings)
+	if err != nil { // 如果准备失败
+		return err // 返回错误
+	}
+
+	// 执行Qdrant写入
+	var pointIDs []string
+	if rp.Storage.Qdrant != nil { // 检查是否初始化
+		pointIDs, err = rp.Storage.Qdrant.StoreResumeVectors(ctx, message.SubmissionUUID, qdrantChunks, floatEmbeddings) // 存储向量
+		if err != nil {                                                                                                  // 如果存储失败
+			rp.logInfo("ProcessLLMTasks: 存储向量到Qdrant失败 for %s: %v", message.SubmissionUUID, err)
+			// 更新状态为失败
+			updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusQdrantStoreFailed)
+			if updateErr != nil {
+				rp.logInfo("更新状态为 QDRANT_STORE_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
+			}
+			return fmt.Errorf("存储向量到Qdrant失败: %w", err)
+		}
+		rp.logDebug("[ProcessLLMTasks] 成功存储 %d 个向量到Qdrant for %s", len(pointIDs), message.SubmissionUUID)
+	} else { // 如果未初始化
+		return fmt.Errorf("qdrant存储服务未初始化")
+	}
+
+	// --- 重新进入事务，执行数据库写操作 ---
+	tx := rp.Storage.MySQL.DB().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	defer tx.Rollback()
+
+	// 执行LLM处理的数据库事务
+	err = rp._executeLLMProcessingTransaction(ctx, tx, message, qdrantChunks, floatEmbeddings, sections, basicInfo, parsedText, pointIDs)
+	if err != nil {
+		return err
+	}
+
+	if err = tx.Commit().Error; err != nil {
 		// 最终失败状态由具体的失败点决定，这里只记录通用失败
-		rp.Config.Logger.Printf("[ProcessLLMTasks] LLM处理流程最终失败 for %s: %v", message.SubmissionUUID, err)
+		rp.logInfo("[ProcessLLMTasks] 提交事务失败 for %s: %v", message.SubmissionUUID, err)
 		// 最终的失败状态更新，如果之前的步骤没有成功更新的话
 		finalErrUpdate := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusLLMProcessingFailed)
 		if finalErrUpdate != nil { // 如果更新失败
-			rp.Config.Logger.Printf("在最终更新状态为 LLM_PROCESSING_FAILED 时出错 for %s: %v", message.SubmissionUUID, finalErrUpdate)
+			rp.logInfo("在最终更新状态为 LLM_PROCESSING_FAILED 时出错 for %s: %v", message.SubmissionUUID, finalErrUpdate)
 		}
 		return err // 返回错误
 	}
 
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 成功完成LLM处理流程 for %s", message.SubmissionUUID))
+	rp.logDebug("[ProcessLLMTasks] 成功完成LLM处理流程 for %s", message.SubmissionUUID)
 	return nil // 成功完成
 }
 
 func (rp *ResumeProcessor) _downloadAndChunkResume(ctx context.Context, message storagetypes.ResumeProcessingMessage) (string, []*types.ResumeSection, map[string]string, error) { // 下载并分块简历
 	parsedText, err := rp.Storage.MinIO.GetParsedText(ctx, message.ParsedTextPathOSS) // 从MinIO获取解析后的文本
 	if err != nil {                                                                   // 如果获取失败
-		rp.Config.Logger.Printf("ProcessLLMTasks: 从MinIO下载解析文本失败 for %s (path: %s): %v", message.SubmissionUUID, message.ParsedTextPathOSS, err)
+		rp.logInfo("ProcessLLMTasks: 从MinIO下载解析文本失败 for %s (path: %s): %v", message.SubmissionUUID, message.ParsedTextPathOSS, err)
 		return "", nil, nil, fmt.Errorf("下载解析文本失败: %w", err)
 	}
 	if parsedText == "" { // 如果文本为空
-		rp.Config.Logger.Printf("ProcessLLMTasks: 下载的解析文本为空 for %s (path: %s)", message.SubmissionUUID, message.ParsedTextPathOSS)
+		rp.logInfo("ProcessLLMTasks: 下载的解析文本为空 for %s (path: %s)", message.SubmissionUUID, message.ParsedTextPathOSS)
 		return "", nil, nil, fmt.Errorf("下载的解析文本为空")
 	}
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 成功下载解析文本 for %s. 文本长度: %d", message.SubmissionUUID, len(parsedText)))
+	rp.logDebug("[ProcessLLMTasks] 成功下载解析文本 for %s. 文本长度: %d", message.SubmissionUUID, len(parsedText))
 
 	if rp.ResumeChunker == nil { // 检查分块器是否初始化
 		return "", nil, nil, fmt.Errorf("ResumeChunker未初始化")
 	}
 	sections, basicInfo, chunkErr := rp.ResumeChunker.ChunkResume(ctx, parsedText) // 对文本进行分块
 	if chunkErr != nil {                                                           // 如果分块失败
-		rp.Config.Logger.Printf("ProcessLLMTasks: LLM简历分块失败 for %s: %v", message.SubmissionUUID, chunkErr)
+		rp.logInfo("ProcessLLMTasks: LLM简历分块失败 for %s: %v", message.SubmissionUUID, chunkErr)
 		return "", nil, nil, fmt.Errorf("LLM简历分块失败: %w", chunkErr)
 	}
 	if len(sections) == 0 { // 如果分块结果为空
-		rp.Config.Logger.Printf("ProcessLLMTasks: LLM简历分块结果为空 for %s", message.SubmissionUUID)
+		rp.logInfo("ProcessLLMTasks: LLM简历分块结果为空 for %s", message.SubmissionUUID)
 		return "", nil, nil, fmt.Errorf("LLM简历分块结果为空")
 	}
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] LLM简历分块成功 for %s. 分块数量: %d", message.SubmissionUUID, len(sections)))
+	rp.logDebug("[ProcessLLMTasks] LLM简历分块成功 for %s. 分块数量: %d", message.SubmissionUUID, len(sections))
 	return parsedText, sections, basicInfo, nil // 返回解析文本、分块、基本信息和nil错误
 }
 
@@ -690,59 +705,47 @@ func (rp *ResumeProcessor) _embedChunks(ctx context.Context, sections []*types.R
 	}
 	chunkEmbeddings, embedErr := rp.ResumeEmbedder.Embed(ctx, sections, basicInfo) // 调用嵌入器进行向量化
 	if embedErr != nil {                                                           // 如果失败
-		rp.Config.Logger.Printf("ProcessLLMTasks: 向量嵌入失败: %v", embedErr)
+		rp.logInfo("ProcessLLMTasks: 向量嵌入失败: %v", embedErr)
 		return nil, fmt.Errorf("向量嵌入失败: %w", embedErr)
 	}
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 向量嵌入调用完成. 返回向量组数量: %d", len(chunkEmbeddings)))
+	rp.logDebug("[ProcessLLMTasks] 向量嵌入调用完成. 返回向量组数量: %d", len(chunkEmbeddings))
 	if len(chunkEmbeddings) != len(sections) { // 检查返回的向量数量是否与分块数量一致
 		return nil, fmt.Errorf("向量嵌入数量(%d)与分块数量(%d)不匹配", len(chunkEmbeddings), len(sections))
 	}
 	return chunkEmbeddings, nil // 返回向量和nil错误
 }
 
-func (rp *ResumeProcessor) _executeLLMProcessingTransaction(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeProcessingMessage, qdrantChunks []types.ResumeChunk, floatEmbeddings [][]float64, sections []*types.ResumeSection, basicInfo map[string]string, parsedText string) error {
-	// 事务开始时，状态已经被更新为 PENDING_LLM，这里不再重复更新
-	// 1. 存储向量到Qdrant (这是一个外部I/O，理想情况下应该在事务之外，但如果失败需要回滚数据库状态，放在事务内简化处理)
-	var pointIDs []string         // 声明一个pointIDs切片
-	if rp.Storage.Qdrant != nil { // 如果Qdrant存储已初始化
-		var storeErr error                                                                                                    // 声明存储错误
-		pointIDs, storeErr = rp.Storage.Qdrant.StoreResumeVectors(ctx, message.SubmissionUUID, qdrantChunks, floatEmbeddings) // 存储向量
-		if storeErr != nil {                                                                                                  // 如果存储失败
-			rp.Config.Logger.Printf("ProcessLLMTasks: 存储向量到Qdrant失败 for %s: %v", message.SubmissionUUID, storeErr)
-			// 更新状态为失败
-			tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Update("processing_status", constants.StatusQdrantStoreFailed)
-			return fmt.Errorf("存储向量到Qdrant失败: %w", storeErr)
-		}
-		rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 成功存储 %d 个向量到Qdrant for %s", len(pointIDs), message.SubmissionUUID))
-	} else { // 如果未初始化
-		return fmt.Errorf("qdrant存储服务未初始化")
-	}
+// _executeLLMProcessingTransaction 执行LLM处理相关的数据库事务
+// 此方法已经假设Qdrant写入已在事务外完成，不再包含Qdrant写入逻辑
+func (rp *ResumeProcessor) _executeLLMProcessingTransaction(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeProcessingMessage, qdrantChunks []types.ResumeChunk, floatEmbeddings [][]float64, sections []*types.ResumeSection, basicInfo map[string]string, parsedText string, pointIDs []string) error {
+	// 此处PointID已通过外部Qdrant.StoreResumeVectors调用获取并传入
+	// 不再需要从qdrantChunks中提取
 
 	// 2. 保存简历分块到MySQL
 	if err := rp.Storage.MySQL.SaveResumeChunks(tx, message.SubmissionUUID, sections, pointIDs); err != nil { // 保存分块信息到MySQL
-		rp.Config.Logger.Printf("ProcessLLMTasks: 保存简历分块到MySQL失败 for %s: %v", message.SubmissionUUID, err)
+		rp.logInfo("ProcessLLMTasks: 保存简历分块到MySQL失败 for %s: %v", message.SubmissionUUID, err)
 		return fmt.Errorf("保存简历分块到MySQL失败: %w", err)
 	}
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 成功保存 %d 个简历分块信息到MySQL for %s", len(sections), message.SubmissionUUID))
+	rp.logDebug("[ProcessLLMTasks] 成功保存 %d 个简历分块信息到MySQL for %s", len(sections), message.SubmissionUUID)
 
 	// 3. 准备并执行最终的数据库更新
 	updates := rp._prepareFinalDBUpdates(basicInfo, pointIDs)                                                                                // 准备最终更新的数据
 	if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Updates(updates).Error; err != nil { // 执行更新
-		rp.Config.Logger.Printf("ProcessLLMTasks: 最终更新数据库失败 for %s: %v", message.SubmissionUUID, err)
+		rp.logInfo("ProcessLLMTasks: 最终更新数据库失败 for %s: %v", message.SubmissionUUID, err)
 		return fmt.Errorf("最终更新数据库失败: %w", err)
 	}
 
-	// 4. 处理与目标岗位匹配
-	err := rp._saveMatchEvaluation(ctx, tx, message, parsedText) // 保存人岗匹配评估结果
-	if err != nil {                                              // 如果失败
-		// 匹配评估失败，更新状态并返回错误
-		tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Update("processing_status", constants.StatusMatchFailed)
-		return err
+	// 4. 如果有指定目标岗位，则保存匹配评估结果
+	if message.TargetJobID != "" {
+		if err := rp._saveMatchEvaluation(ctx, tx, message, parsedText); err != nil {
+			// 这个失败不影响整体流程，记录日志后继续
+			log.Printf("WARNING: 保存JD匹配评估失败 for %s, JobID %s: %v", message.SubmissionUUID, message.TargetJobID, err)
+		}
 	}
 
 	// 5. 所有步骤成功，更新为最终成功状态
 	if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Update("processing_status", constants.StatusProcessingCompleted).Error; err != nil {
-		rp.Config.Logger.Printf("ProcessLLMTasks: 更新最终成功状态失败 for %s: %v", message.SubmissionUUID, err)
+		rp.logInfo("ProcessLLMTasks: 更新最终成功状态失败 for %s: %v", message.SubmissionUUID, err)
 		return fmt.Errorf("更新最终成功状态失败: %w", err)
 	}
 
@@ -810,7 +813,7 @@ func (rp *ResumeProcessor) _prepareQdrantData(submissionUUID string, sections []
 			floatEmbeddings[i] = chunkEmbeddings[i].Vector // 赋值向量
 		} else { // 如果不存在
 			floatEmbeddings[i] = make([]float64, rp.Config.DefaultDimensions) // 创建一个默认的空向量
-			rp.Config.Logger.Printf("ProcessLLMTasks: 发现空嵌入向量 at index %d for %s, 使用默认空向量", i, submissionUUID)
+			rp.logInfo("ProcessLLMTasks: 发现空嵌入向量 at index %d for %s, 使用默认空向量", i, submissionUUID)
 		}
 
 		qdrantChunks[i] = types.ResumeChunk{ // 创建Qdrant分块
@@ -846,22 +849,22 @@ func (rp *ResumeProcessor) _saveMatchEvaluation(ctx context.Context, tx *gorm.DB
 
 	job, err := rp.Storage.MySQL.GetJobByID(tx.WithContext(ctx), message.TargetJobID) // 根据ID获取岗位信息
 	if err != nil {                                                                   // 如果获取失败
-		rp.Config.Logger.Printf("ProcessLLMTasks: 获取JD信息失败 for JobID %s, Submission %s: %v", message.TargetJobID, message.SubmissionUUID, err)
+		rp.logInfo("ProcessLLMTasks: 获取JD信息失败 for JobID %s, Submission %s: %v", message.TargetJobID, message.SubmissionUUID, err)
 		return fmt.Errorf("获取JD信息失败: %w", err)
 	}
 	if job.JobDescriptionText == "" { // 如果JD文本为空
-		rp.Config.Logger.Printf("ProcessLLMTasks: JD文本为空 for JobID %s, Submission %s", message.TargetJobID, message.SubmissionUUID)
+		rp.logInfo("ProcessLLMTasks: JD文本为空 for JobID %s, Submission %s", message.TargetJobID, message.SubmissionUUID)
 		return fmt.Errorf("JD文本为空")
 	}
 
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 成功获取JD文本 for JobID %s. JD长度: %d", message.TargetJobID, len(job.JobDescriptionText)))
+	rp.logDebug("[ProcessLLMTasks] 成功获取JD文本 for JobID %s. JD长度: %d", message.TargetJobID, len(job.JobDescriptionText))
 	evaluation, evalErr := rp.MatchEvaluator.EvaluateMatch(ctx, job.JobDescriptionText, parsedText) // 进行人岗匹配评估
 	if evalErr != nil {                                                                             // 如果评估失败
-		rp.Config.Logger.Printf("ProcessLLMTasks: JD匹配评估失败 for JobID %s, Submission %s: %v", message.TargetJobID, message.SubmissionUUID, evalErr)
+		rp.logInfo("ProcessLLMTasks: JD匹配评估失败 for JobID %s, Submission %s: %v", message.TargetJobID, message.SubmissionUUID, evalErr)
 		return fmt.Errorf("JD匹配评估失败: %w", evalErr)
 	}
 
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] JD匹配评估成功 for JobID %s, Submission %s. Score: %d", message.TargetJobID, message.SubmissionUUID, evaluation.MatchScore))
+	rp.logDebug("[ProcessLLMTasks] JD匹配评估成功 for JobID %s, Submission %s. Score: %d", message.TargetJobID, message.SubmissionUUID, evaluation.MatchScore)
 	matchHighlightsJSON, _ := json.Marshal(evaluation.MatchHighlights) // 序列化匹配亮点
 	potentialGapsJSON, _ := json.Marshal(evaluation.PotentialGaps)     // 序列化潜在差距
 
@@ -876,11 +879,11 @@ func (rp *ResumeProcessor) _saveMatchEvaluation(ctx context.Context, tx *gorm.DB
 		EvaluatedAt:            utils.TimePtr(time.Now()),     // 评估时间
 	}
 	if err := rp.Storage.MySQL.CreateJobSubmissionMatch(tx.WithContext(ctx), &matchRecord); err != nil { // 创建记录
-		rp.Config.Logger.Printf("ProcessLLMTasks: 保存JD匹配结果失败 for JobID %s, Submission %s: %v", message.TargetJobID, message.SubmissionUUID, err)
+		rp.logInfo("ProcessLLMTasks: 保存JD匹配结果失败 for JobID %s, Submission %s: %v", message.TargetJobID, message.SubmissionUUID, err)
 		return fmt.Errorf("保存JD匹配结果失败: %w", err)
 	}
 
-	rp.LogDebug(fmt.Sprintf("[ProcessLLMTasks] 成功保存JD匹配结果 for JobID %s, Submission %s", message.TargetJobID, message.SubmissionUUID))
+	rp.logDebug("[ProcessLLMTasks] 成功保存JD匹配结果 for JobID %s, Submission %s", message.TargetJobID, message.SubmissionUUID)
 	return nil // 返回nil表示成功
 }
 

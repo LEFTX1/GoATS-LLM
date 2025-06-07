@@ -69,6 +69,34 @@ const (
 	SourceChannelWebUpload = "web_upload"
 )
 
+// StatusSets 定义不同操作允许的状态集合
+var (
+	// AllowedStatusesForLLM 允许进行LLM处理的状态
+	AllowedStatusesForLLM = map[string]bool{
+		StatusPendingLLM:   true,
+		StatusQueuedForLLM: true,
+	}
+
+	// AllowedStatusesForParsing 允许进行初始解析的状态
+	AllowedStatusesForParsing = map[string]bool{
+		StatusSubmittedForProcessing: true,
+		StatusPendingParsing:         true,
+	}
+
+	// AllowedStatusesForRetry 允许重试的状态
+	AllowedStatusesForRetry = map[string]bool{
+		StatusChunkingFailed:      true,
+		StatusVectorizationFailed: true,
+		StatusQdrantStoreFailed:   true,
+		StatusLLMProcessingFailed: true,
+	}
+)
+
+// IsStatusAllowed 检查给定状态是否在允许的状态集中
+func IsStatusAllowed(status string, allowedSet map[string]bool) bool {
+	return allowedSet[status]
+}
+
 // 这是一个格式化Redis键的辅助函数说明。
 // 理想情况下，这个函数应该位于Redis工具包或storage.Redis模块中。
 // 在这里定义只是为了阐明这些常量将如何被使用。
