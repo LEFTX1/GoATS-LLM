@@ -434,7 +434,7 @@ func main() {
 		})
 	})
 
-	router.RegisterRoutes(h, resumeHandler, jobSearchHandler)
+	router.RegisterRoutes(h, resumeHandler, jobSearchHandler, storageManager, cfg)
 	glog.Info("HTTP路由注册成功")
 
 	glog.Infof("HTTP 服务器启动中，监听地址: %s", cfg.Server.Address)

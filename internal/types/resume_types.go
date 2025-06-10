@@ -109,3 +109,34 @@ type ResumeData struct {
 		Education       string   `json:"education"`
 	} `json:"summary"`
 }
+
+// RankedSubmission holds the final aggregated score for a submission, used in search results.
+type RankedSubmission struct {
+	SubmissionUUID string
+	Score          float32
+}
+
+// PaginatedResumeResponse 分页简历响应
+type PaginatedResumeResponse struct {
+	JobID      string             `json:"job_id"`
+	Cursor     int64              `json:"cursor"`
+	NextCursor int64              `json:"next_cursor"`
+	Size       int64              `json:"size"`
+	TotalCount int64              `json:"total_count"`
+	Resumes    []ResumeWithChunks `json:"resumes"`
+}
+
+// ResumeWithChunks 包含所有块的简历
+type ResumeWithChunks struct {
+	SubmissionUUID string            `json:"submission_uuid"`
+	BasicInfo      map[string]string `json:"basic_info"`
+	Chunks         []ResumeChunkData `json:"chunks"`
+}
+
+// ResumeChunkData 简历块数据
+type ResumeChunkData struct {
+	ChunkID     int    `json:"chunk_id"`
+	ChunkType   string `json:"chunk_type"`
+	ChunkTitle  string `json:"chunk_title"`
+	ContentText string `json:"content_text"`
+}

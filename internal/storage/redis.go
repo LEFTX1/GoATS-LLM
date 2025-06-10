@@ -11,6 +11,7 @@ import (
 
 	"ai-agent-go/internal/config"    // Import the main config package
 	"ai-agent-go/internal/constants" // 新增：导入集中的常量包
+	"ai-agent-go/internal/types"
 
 	"github.com/redis/go-redis/extra/redisotel/v9" // 添加Redis OpenTelemetry钩子包
 	"github.com/redis/go-redis/v9"
@@ -675,4 +676,123 @@ func (r *Redis) Set(ctx context.Context, key string, value string, expiration ti
 	}
 
 	return nil
+}
+
+// CacheSearchResults将排序好的"黄金结果集"缓存到Redis的ZSET中。
+// searchID是该次搜索的唯一标识，results是排序后的简历列表，ttl是缓存过期时间。
+func (r *Redis) CacheSearchResults(ctx context.Context, searchID string, results []types.RankedSubmission, ttl time.Duration) error {
+	if r.Client == nil {
+		return fmt.Errorf("redis client is not initialized")
+	}
+
+	key := r.FormatKey(constants.SearchResultCachePrefix, searchID)
+
+	pipe := r.Client.Pipeline()
+
+	// 准备要添加到ZSET的数据
+	members := make([]redis.Z, len(results))
+	for i, res := range results {
+		members[i] = redis.Z{
+			Score:  float64(res.Score),
+			Member: res.SubmissionUUID,
+		}
+	}
+
+	// 使用ZAdd命令一次性添加所有成员
+	pipe.ZAdd(ctx, key, members...)
+	// 设置过期时间
+	pipe.Expire(ctx, key, ttl)
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("caching search results failed: %w", err)
+	}
+
+	return nil
+}
+
+// GetCachedSearchResults从Redis的ZSET中分页获取缓存的搜索结果。
+// 它返回UUID列表、总数和错误。
+func (r *Redis) GetCachedSearchResults(ctx context.Context, searchID string, cursor, limit int64) (uuids []string, totalCount int64, err error) {
+	if r.Client == nil {
+		return nil, 0, fmt.Errorf("redis client is not initialized")
+	}
+
+	key := r.FormatKey(constants.SearchResultCachePrefix, searchID)
+
+	pipe := r.Client.Pipeline()
+
+	// 使用 ZREVRANGE 获取按分数从高到低排序的UUID
+	resCmd := pipe.ZRevRange(ctx, key, cursor, cursor+limit-1)
+	// 使用 ZCARD 获取总数
+	countCmd := pipe.ZCard(ctx, key)
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		// 如果key不存在，redis.Nil错误会在这里被捕获
+		if err == redis.Nil {
+			return nil, 0, nil // 缓存未命中，是正常情况，不返回错误
+		}
+		return nil, 0, fmt.Errorf("getting cached search results failed: %w", err)
+	}
+
+	uuids, err = resCmd.Result()
+	if err != nil {
+		// 再次检查 redis.Nil，尽管不太可能在Exec成功后发生
+		if err == redis.Nil {
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("failed to get uuids from cache: %w", err)
+	}
+
+	totalCount, err = countCmd.Result()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get total count from cache: %w", err)
+	}
+
+	return uuids, totalCount, nil
+}
+
+// AcquireLock 尝试获取分布式锁
+// 返回值: 锁的值(成功时), 错误(如果有)
+// 如果返回空字符串且无错误，表示锁已被其他进程持有
+func (r *Redis) AcquireLock(ctx context.Context, lockKey string, expiration time.Duration) (string, error) {
+	// 生成随机UUID作为锁的值，用于标识锁的持有者
+	lockValue := fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int())
+
+	// 使用 SET NX 命令尝试获取锁
+	// NX表示key不存在时才设置，PX设置过期时间（毫秒）
+	ok, err := r.Client.SetNX(ctx, lockKey, lockValue, expiration).Result()
+	if err != nil {
+		return "", fmt.Errorf("获取锁失败: %w", err)
+	}
+
+	if !ok {
+		// 锁已被其他进程获取
+		return "", nil
+	}
+
+	// 成功获取锁，返回锁标识
+	return lockValue, nil
+}
+
+// ReleaseLock 释放分布式锁
+// 使用Lua脚本确保原子性：只释放由当前持有者持有的锁
+func (r *Redis) ReleaseLock(ctx context.Context, lockKey string, lockValue string) (bool, error) {
+	// Lua脚本：仅当锁存在且值匹配时才删除
+	script := `
+	if redis.call("GET", KEYS[1]) == ARGV[1] then
+		return redis.call("DEL", KEYS[1])
+	else
+		return 0
+	end`
+
+	// 执行Lua脚本
+	result, err := r.Client.Eval(ctx, script, []string{lockKey}, lockValue).Result()
+	if err != nil {
+		return false, fmt.Errorf("释放锁失败: %w", err)
+	}
+
+	// 1表示成功删除，0表示锁不存在或已被其他进程获取
+	return result.(int64) == 1, nil
 }

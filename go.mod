@@ -8,6 +8,7 @@ require (
 	github.com/cloudwego/hertz v0.9.2
 	github.com/gofrs/uuid/v5 v5.3.2
 	github.com/google/uuid v1.6.0
+	github.com/hertz-contrib/keyauth v0.0.0-20221011055545-d02ab20cb1ca
 	github.com/hertz-contrib/logger/zerolog v1.0.0
 	github.com/hertz-contrib/obs-opentelemetry/tracing v0.4.1
 	github.com/minio/minio-go/v7 v7.0.67
@@ -77,6 +78,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/redis/go-redis/extra/rediscmd/v9 v9.10.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
+	github.com/savsgio/gotils v0.0.0-20220530130905-52f3993e8d6d // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

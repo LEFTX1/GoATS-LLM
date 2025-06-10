@@ -20,9 +20,9 @@ import (
 	"strings"                               // 导入字符串操作包。
 	"time"                                  // 导入时间处理包。
 
-	"github.com/cloudwego/hertz/pkg/app"     // 导入Hertz框架的应用上下文包，Hertz是高性能的HTTP框架。
-	"github.com/gofrs/uuid/v5"               // 导入UUID生成库，特别是版本5，用于生成唯一标识符。
-	amqp091 "github.com/rabbitmq/amqp091-go" // 导入RabbitMQ的Go客户端库。
+	"github.com/cloudwego/hertz/pkg/app" // 导入Hertz框架的应用上下文包，Hertz是高性能的HTTP框架。
+	"github.com/gofrs/uuid/v5"           // 导入UUID生成库，特别是版本5，用于生成唯一标识符。
+	"github.com/rabbitmq/amqp091-go"     // 导入RabbitMQ的Go客户端库。
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute" // 导入OpenTelemetry的attribute包，用于定义span的属性。
 	"go.opentelemetry.io/otel/codes"     // 导入OpenTelemetry的codes包，用于定义span的状态码。

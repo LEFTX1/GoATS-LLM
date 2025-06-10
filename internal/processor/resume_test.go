@@ -57,21 +57,21 @@ func TestPrepareQdrantData_FilterBasicInfo(t *testing.T) {
 			Section: sections[0], // BASIC_INFO
 			Vector:  []float64{0.1, 0.2, 0.3},
 			Metadata: map[string]interface{}{
-				"importance_score": float64(1.0),
+				"importance_score": 1.0,
 			},
 		},
 		{
 			Section: sections[1], // EDUCATION
 			Vector:  []float64{0.4, 0.5, 0.6},
 			Metadata: map[string]interface{}{
-				"importance_score": float64(1.0),
+				"importance_score": 1.0,
 			},
 		},
 		{
 			Section: sections[2], // WORK_EXPERIENCE
 			Vector:  []float64{0.7, 0.8, 0.9},
 			Metadata: map[string]interface{}{
-				"importance_score": float64(1.0),
+				"importance_score": 1.0,
 			},
 		},
 	}

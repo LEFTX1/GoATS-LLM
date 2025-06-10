@@ -24,6 +24,9 @@ const (
 	// JobEvalCachePrefix LLM Evaluation Cache
 	JobEvalCachePrefix = TenantPlaceholder + ":job_eval:" // LLM人岗匹配评估结果的缓存前缀。键格式: {tenant}:job_eval:{job_id}:{text_md5}
 
+	// SearchResultCachePrefix is for caching the 'golden result set' of a search.
+	SearchResultCachePrefix = TenantPlaceholder + ":search_result:" // 缓存搜索"黄金结果集"的键前缀。键格式: {tenant}:search_result:{search_session_id}
+
 	// ReviewedResumesByJobTextMD5HashPrefix HR Review Tracking
 	// Stores a HASH where field is hr_id and value is action string
 	ReviewedResumesByJobTextMD5HashPrefix = TenantPlaceholder + ":reviewed_job_resumes:" // 追踪HR评审记录的哈希键前缀。
