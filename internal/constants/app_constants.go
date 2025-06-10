@@ -13,8 +13,9 @@ const (
 	// Format: {tenant}:{namespace}:{id_or_purpose}
 
 	// JobVectorCachePrefix JD Processing
-	JobVectorCachePrefix   = TenantPlaceholder + ":job_vector:"   // 职位描述(JD)向量的缓存前缀。键格式: {tenant}:job_vector:{job_id}
-	JobKeywordsCachePrefix = TenantPlaceholder + ":job_keywords:" // 职位描述(JD)关键词的缓存前缀。键格式: {tenant}:job_keywords:{job_id}
+	JobVectorCachePrefix          = TenantPlaceholder + ":job_vector:"   // 职位描述(JD)向量的缓存前缀。键格式: {tenant}:job_vector:{job_id}
+	JobKeywordsCachePrefix        = TenantPlaceholder + ":job_keywords:" // 职位描述(JD)关键词的缓存前缀。键格式: {tenant}:job_keywords:{job_id}
+	JobDescriptionTextCachePrefix = "jd_text_cache:"                     // 职位描述纯文本的缓存前缀。
 
 	// RawFileMD5SetKey Resume Deduplication (Original File and Parsed Text)
 	RawFileMD5SetKey    = TenantPlaceholder + ":file_md5s_set" // 存储原始简历文件MD5的Redis集合键。用于文件去重。

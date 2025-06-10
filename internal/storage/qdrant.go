@@ -2,6 +2,7 @@ package storage
 
 import (
 	"ai-agent-go/internal/config"
+	"ai-agent-go/internal/tracing"
 	"ai-agent-go/internal/types"
 	"bytes"
 	"context"
@@ -13,12 +14,28 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid/v5" // 导入uuid包
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// 定义Qdrant的专用tracer
+var qdrantTracer = otel.Tracer("ai-agent-go/storage/qdrant")
+
+// QdrantPointIDNamespace is a dedicated namespace for generating deterministic Qdrant point IDs for resume chunks.
+// This ensures that for the same resume and same chunk, we always get the same point ID.
+// UUID generated via `uuidgen`
+var QdrantPointIDNamespace = uuid.Must(uuid.FromString("fd6c72c2-5a33-4b53-8e7c-8298f3f5a7e1"))
 
 // VectorDatabase 向量数据库接口
 type VectorDatabase interface {
 	// StoreResumeVectors 存储简历向量
 	StoreResumeVectors(ctx context.Context, resumeID string, chunks []types.ResumeChunk, embeddings [][]float64) ([]string, error)
+
+	// GetVectorsBySubmissionUUID 通过 submission_uuid 获取向量
+	GetVectorsBySubmissionUUID(ctx context.Context, submissionUUID string) ([]SearchResult, error)
 
 	// SearchSimilarResumes 搜索相似简历
 	SearchSimilarResumes(ctx context.Context, queryVector []float64, limit int, filter map[string]interface{}) ([]SearchResult, error)
@@ -105,26 +122,58 @@ func NewQdrant(cfg *config.QdrantConfig, opts ...QdrantOption) (*Qdrant, error) 
 
 // ensureCollectionExists 确保向量集合存在
 func (q *Qdrant) ensureCollectionExists(ctx context.Context) error {
+	// 创建一个命名span
+	ctx, span := qdrantTracer.Start(ctx, "Qdrant.EnsureCollectionExists",
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	// 添加基础属性
+	span.SetAttributes(
+		attribute.String("net.peer.name", q.endpoint),
+		attribute.String("db.system", "qdrant"),
+		attribute.String("db.operation", "check_collection"),
+		attribute.String("db.collection", q.collectionName),
+		attribute.Int("db.vector_size", q.vectorSize),
+	)
+
 	// 先检查集合是否已存在
 	url := fmt.Sprintf("%s/collections/%s", q.endpoint, q.collectionName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("创建检查集合请求失败: %w", err)
 	}
 
+	// 注入OpenTelemetry追踪上下文到HTTP请求
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+	span.SetAttributes(
+		attribute.String("http.method", http.MethodGet),
+		attribute.String("http.url", url),
+	)
+
 	resp, err := q.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("发送检查集合请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// 如果集合不存在，则创建它
 	if resp.StatusCode == http.StatusNotFound {
+		span.AddEvent("collection_not_found", trace.WithAttributes(
+			attribute.String("action", "create_collection"),
+		))
 		log.Printf("集合 '%s' 不存在，将创建新集合", q.collectionName)
 		return q.createCollection(ctx)
 	} else if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("检查集合失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("检查集合失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 
 	// 检查集合配置是否匹配当前配置
@@ -143,28 +192,58 @@ func (q *Qdrant) ensureCollectionExists(ctx context.Context) error {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("读取集合信息响应失败: %w", err)
 	}
 
 	if err := json.Unmarshal(body, &collectionInfo); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("解析集合信息失败: %w", err)
 	}
 
 	existingSize := collectionInfo.Result.Config.Params.Vectors.Size
 	existingDistance := collectionInfo.Result.Config.Params.Vectors.Distance
 
+	span.SetAttributes(
+		attribute.Int("collection.existing_vector_size", existingSize),
+		attribute.String("collection.existing_distance", existingDistance),
+	)
+
 	if existingSize != q.vectorSize || existingDistance != q.distanceMetric {
 		log.Printf("警告: 现有集合配置与当前配置不匹配。现有: 维度=%d, 距离=%s; 当前: 维度=%d, 距离=%s",
 			existingSize, existingDistance, q.vectorSize, q.distanceMetric)
 		// 如需重新创建集合，可在此处添加逻辑
+
+		span.AddEvent("collection_config_mismatch", trace.WithAttributes(
+			attribute.Int("expected_vector_size", q.vectorSize),
+			attribute.String("expected_distance", q.distanceMetric),
+		))
 	}
 
+	span.SetStatus(codes.Ok, "")
 	log.Printf("已发现现有Qdrant集合: %s，维度: %d", q.collectionName, existingSize)
 	return nil
 }
 
 // createCollection 创建新的向量集合
 func (q *Qdrant) createCollection(ctx context.Context) error {
+	// 创建一个命名span
+	ctx, span := qdrantTracer.Start(ctx, "Qdrant.CreateCollection",
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	// 添加基础属性
+	span.SetAttributes(
+		attribute.String("net.peer.name", q.endpoint),
+		attribute.String("db.system", "qdrant"),
+		attribute.String("db.operation", "create_collection"),
+		attribute.String("db.collection", q.collectionName),
+		attribute.Int("db.vector_size", q.vectorSize),
+		attribute.String("db.vector.distance", q.distanceMetric),
+	)
+
 	// 准备创建集合的请求
 	createReqBody := map[string]interface{}{
 		"vectors": map[string]interface{}{
@@ -179,6 +258,8 @@ func (q *Qdrant) createCollection(ctx context.Context) error {
 
 	jsonData, err := json.Marshal(createReqBody)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("序列化创建集合请求失败: %w", err)
 	}
 
@@ -186,12 +267,25 @@ func (q *Qdrant) createCollection(ctx context.Context) error {
 	url := fmt.Sprintf("%s/collections/%s", q.endpoint, q.collectionName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(jsonData))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("创建集合请求对象失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	// 注入OpenTelemetry追踪上下文到HTTP请求
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+	span.SetAttributes(
+		attribute.String("http.method", http.MethodPut),
+		attribute.String("http.url", url),
+		attribute.Int("http.request_content_length", len(jsonData)),
+	)
+
 	resp, err := q.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("发送创建集合请求失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -199,253 +293,281 @@ func (q *Qdrant) createCollection(ctx context.Context) error {
 	// 检查响应
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("创建集合失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("创建集合失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 
+	span.SetStatus(codes.Ok, "")
 	log.Printf("已成功创建Qdrant集合: %s，维度: %d", q.collectionName, q.vectorSize)
 	return nil
 }
 
-// StoreResumeVectors 存储简历向量到Qdrant
+// StoreResumeVectors 存储简历向量
 func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks []types.ResumeChunk, embeddings [][]float64) ([]string, error) {
+	// 创建一个命名span
+	ctx, span := qdrantTracer.Start(ctx, "Qdrant.StoreResumeVectors",
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	// 添加基础属性
+	span.SetAttributes(
+		attribute.String("db.system", "qdrant"),
+		attribute.String("db.operation", "store_vectors"),
+		attribute.String("db.collection", q.collectionName),
+		attribute.String("resume.id", resumeID),
+		attribute.Int("vectors.count", len(embeddings)),
+	)
+
+	// 验证输入
 	if len(chunks) != len(embeddings) {
-		return nil, fmt.Errorf("块数量 (%d) 和嵌入数量 (%d) 不匹配", len(chunks), len(embeddings))
+		err := fmt.Errorf("chunks数量(%d)与embeddings数量(%d)不匹配", len(chunks), len(embeddings))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
-	if len(chunks) == 0 {
-		log.Printf("StoreResumeVectors: resumeID %s 没有块需要存储", resumeID)
+	if len(embeddings) == 0 {
+		span.AddEvent("warning", trace.WithAttributes(
+			attribute.String("message", "没有要存储的向量"),
+		))
+		span.SetStatus(codes.Ok, "no vectors to store")
 		return []string{}, nil
 	}
 
-	// Qdrant 点结构
-	type QdrantPoint struct {
-		ID      string                 `json:"id"` // Qdrant 要求 ID 是 UUID 或 uint64
-		Vector  []float64              `json:"vector"`
-		Payload map[string]interface{} `json:"payload"`
-	}
+	// 准备要存储的点
+	points := make([]interface{}, 0, len(embeddings))
+	ids := make([]string, 0, len(embeddings))
 
-	points := make([]QdrantPoint, 0, len(chunks))
-	storedPointIDs := make([]string, 0, len(chunks))
-
-	// 从 resumeID (submission_uuid) 创建一个命名空间UUID
-	// 这确保了对于给定的提交，其点ID是确定性的。
-	namespaceUUID, err := uuid.FromString(resumeID)
-	if err != nil {
-		return nil, fmt.Errorf("无法从 resumeID '%s' 创建命名空间UUID: %w", resumeID, err)
-	}
-
-	for i, chunk := range chunks {
-		if embeddings[i] == nil {
-			log.Printf("StoreResumeVectors: resumeID %s, chunk %d 的嵌入向量为nil，跳过存储", resumeID, chunk.ChunkID)
-			continue
+	// 遍历所有chunk和embedding
+	for i, embedding := range embeddings {
+		if len(embedding) != q.vectorSize {
+			err := fmt.Errorf("向量维度(%d)与配置维度(%d)不匹配", len(embedding), q.vectorSize)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, err
 		}
 
-		// 为每个点生成确定性的UUIDv5作为其ID
-		// 这确保了对同一份简历的同一分块的重复处理不会在Qdrant中创建重复的点，从而实现幂等性
-		pointID := uuid.NewV5(namespaceUUID, fmt.Sprintf("chunk-%d", chunk.ChunkID)).String()
+		chunk := chunks[i]
+		// 生成一个确定性的唯一ID，基于 resumeID 和 chunk ID
+		// 使用 resumeID 和 chunk 的唯一标识符作为源来保证幂等性
+		idSource := fmt.Sprintf("resume_id:%s_chunk_id:%d", resumeID, chunk.ChunkID)
+		pointID := uuid.NewV5(QdrantPointIDNamespace, idSource).String()
+		ids = append(ids, pointID)
 
-		// 构建载荷 (Payload)
+		// 准备payload，包含所有需要存储的元数据
 		payload := map[string]interface{}{
-			"resume_id":           resumeID,      // 关联回原始的简历提交UUID
-			"original_chunk_id":   chunk.ChunkID, // 来自LLM分块器的原始chunk_id
-			"chunk_type":          chunk.ChunkType,
-			"content_preview":     truncateString(chunk.Content, 200), // 内容预览
-			"importance_score":    chunk.ImportanceScore,
-			"name":                chunk.UniqueIdentifiers.Name,
-			"phone":               chunk.UniqueIdentifiers.Phone,
-			"email":               chunk.UniqueIdentifiers.Email,
-			"experience_years":    chunk.Metadata.ExperienceYears,
-			"education_level":     chunk.Metadata.EducationLevel,
-			"full_content_length": len(chunk.Content), // 存储完整内容的长度
-			// 可以添加更多来自 chunk.UniqueIdentifiers 和 chunk.Metadata 的字段
+			"submission_uuid":  resumeID, // 使用 submission_uuid 作为键
+			"chunk_idx":        i,
+			"chunk_id":         chunk.ChunkID,
+			"content":          tracing.SafeResumeContent(chunk.Content), // 安全处理简历内容
+			"chunk_type":       chunk.ChunkType,
+			"chunk_title":      chunk.ChunkTitle, // 使用Section的Title作为标题
+			"importance_score": chunk.ImportanceScore,
 		}
-		// 如果需要存储完整内容，可以取消注释下一行，但要注意Qdrant对payload大小的潜在限制
-		// payload["full_content"] = chunk.Content
 
-		points = append(points, QdrantPoint{
-			ID:      pointID,
-			Vector:  embeddings[i],
-			Payload: payload,
-		})
-		storedPointIDs = append(storedPointIDs, pointID)
+		// 添加唯一标识符 - 使用安全处理防止PII泄露
+		if chunk.UniqueIdentifiers.Name != "" {
+			payload["name"] = tracing.MaskPII(chunk.UniqueIdentifiers.Name)
+		}
+		if chunk.UniqueIdentifiers.Email != "" {
+			payload["email"] = tracing.MaskPII(chunk.UniqueIdentifiers.Email)
+		}
+		if chunk.UniqueIdentifiers.Phone != "" {
+			payload["phone"] = tracing.MaskPII(chunk.UniqueIdentifiers.Phone)
+		}
+
+		// 添加元数据
+		if chunk.Metadata.ExperienceYears > 0 {
+			payload["experience_years"] = chunk.Metadata.ExperienceYears
+		}
+		if chunk.Metadata.EducationLevel != "" {
+			payload["education_level"] = chunk.Metadata.EducationLevel
+		}
+
+		// 创建向量点
+		point := map[string]interface{}{
+			"id":      pointID, // Qdrant 要求 ID 是 UUID 或 uint64
+			"vector":  embedding,
+			"payload": payload,
+		}
+
+		points = append(points, point)
 	}
 
-	if len(points) == 0 {
-		log.Printf("StoreResumeVectors: resumeID %s 在过滤掉nil嵌入后没有有效的点需要存储", resumeID)
-		return []string{}, nil
+	// 在span中记录首个chunk的简要信息 (安全处理)
+	if len(chunks) > 0 {
+		firstChunk := chunks[0]
+		span.SetAttributes(
+			attribute.String("sample.chunk_type", firstChunk.ChunkType),
+			attribute.Int("sample.importance_score", int(firstChunk.ImportanceScore*100)), // 转为整数
+			attribute.String("sample.content_preview", tracing.SafeResumeContent(firstChunk.Content)),
+		)
 	}
 
-	// 准备批量upsert请求
-	upsertReqBody := map[string][]QdrantPoint{
+	// 构造请求体
+	reqBody := map[string]interface{}{
 		"points": points,
 	}
-	jsonData, err := json.Marshal(upsertReqBody)
+
+	// 执行API调用
+	var result struct {
+		Result struct {
+			Status string `json:"status"`
+		} `json:"result"`
+		Status string  `json:"status"`
+		Time   float64 `json:"time"`
+	}
+
+	// 使用doRequest方法发送请求
+	err := q.doRequest(ctx, "PUT", fmt.Sprintf("/collections/%s/points?wait=true", q.collectionName), reqBody, &result)
 	if err != nil {
-		return nil, fmt.Errorf("序列化Qdrant点请求失败: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
-	// 发送请求
-	url := fmt.Sprintf("%s/collections/%s/points?wait=true", q.endpoint, q.collectionName) // wait=true 确保操作完成
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("创建Qdrant点upsert请求失败: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// 记录API响应信息
+	span.SetAttributes(
+		attribute.String("qdrant.response_status", result.Status),
+		attribute.Float64("qdrant.response_time", result.Time),
+	)
 
-	resp, err := q.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("发送Qdrant点upsert请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body) // 读取响应体以供调试
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("qdrant点upsert失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
-	}
-
-	// 检查响应状态
-	var qdrantResp struct {
-		Result interface{} `json:"result"`
-		Status string      `json:"status"`
-		Time   float64     `json:"time"`
-		Error  string      `json:"error,omitempty"` // 早期版本的 Qdrant 可能在 result 中包含 error
-	}
-	if err := json.Unmarshal(respBody, &qdrantResp); err != nil {
-		log.Printf("StoreResumeVectors: 解析Qdrant upsert响应失败 for resumeID %s: %v. Body: %s", resumeID, err, string(respBody))
-		// 即使解析失败，如果状态码是200，也可能操作已成功，但最好记录下来
-	}
-
-	if qdrantResp.Status != "ok" && qdrantResp.Status != "acknowledged" && qdrantResp.Status != "completed" {
-		// "acknowledged" and "completed" are also valid success statuses for async operations or different versions.
-		// For wait=true, "ok" or "completed" is more common.
-		errMsg := fmt.Sprintf("Qdrant upsert 响应状态不是 'ok', 'acknowledged', or 'completed', 而是 '%s'", qdrantResp.Status)
-		if qdrantResp.Error != "" {
-			errMsg = fmt.Sprintf("%s. Qdrant Error: %s", errMsg, qdrantResp.Error)
-		} else if resultError, ok := qdrantResp.Result.(map[string]interface{}); ok && resultError["error"] != nil {
-			// 检查 result 字段中是否包含 error
-			errMsg = fmt.Sprintf("%s. Qdrant Result Error: %v", errMsg, resultError["error"])
-		}
-		log.Printf("StoreResumeVectors: %s for resumeID %s. Full Response: %s", errMsg, resumeID, string(respBody))
-		return nil, fmt.Errorf(errMsg)
-	}
-
-	log.Printf("成功存储/更新 %d 个向量点到Qdrant for resumeID %s. Point IDs: %v", len(points), resumeID, storedPointIDs)
-	return storedPointIDs, nil
+	span.SetStatus(codes.Ok, "")
+	return ids, nil
 }
 
-// SearchSimilarResumes 搜索相似简历
-// 现在接受float64类型向量，与阿里云API兼容
+// SearchSimilarResumes 在Qdrant中搜索与给定查询向量相似的简历
 func (q *Qdrant) SearchSimilarResumes(ctx context.Context, queryVector []float64, limit int, filter map[string]interface{}) ([]SearchResult, error) {
-	// 构建搜索请求
-	searchRequest := map[string]interface{}{
-		"vector": queryVector,
-		"limit":  limit,
-		"with": map[string]interface{}{
-			"payload": true,  // 返回payload
-			"vector":  false, // 不需要返回向量
-		},
+	// 创建一个命名span
+	ctx, span := qdrantTracer.Start(ctx, "Qdrant.SearchSimilarResumes",
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	// 添加基础属性
+	span.SetAttributes(
+		attribute.String("db.system", "qdrant"),
+		attribute.String("db.operation", "search_vectors"),
+		attribute.String("db.collection", q.collectionName),
+		attribute.Int("search.limit", limit),
+		attribute.String("search.filter", fmt.Sprintf("%v", filter)),
+		attribute.Int("query_vector.size", len(queryVector)),
+	)
+
+	if len(queryVector) != q.vectorSize {
+		err := fmt.Errorf("查询向量维度(%d)与配置维度(%d)不匹配", len(queryVector), q.vectorSize)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
-	// 如果有过滤条件，添加到请求中
+	if limit <= 0 {
+		limit = 10 // 默认限制为10
+	}
+
+	// 构造请求体
+	searchReq := map[string]interface{}{
+		"vector":       queryVector,
+		"limit":        limit,
+		"with_payload": true,
+	}
+
+	// 如果有过滤器，添加到请求中
 	if filter != nil && len(filter) > 0 {
-		searchRequest["filter"] = filter
-	}
-
-	jsonData, err := json.Marshal(searchRequest)
-	if err != nil {
-		return nil, fmt.Errorf("序列化搜索请求失败: %w", err)
+		// Qdrant要求过滤器具有特定格式，这里简化处理
+		searchReq["filter"] = filter
 	}
 
 	// 发送搜索请求
-	url := fmt.Sprintf("%s/collections/%s/points/search", q.endpoint, q.collectionName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("创建搜索请求失败: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := q.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("发送搜索请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查响应
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("搜索向量失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
-	}
-
-	// 解析响应
-	var searchResp struct {
+	var result struct {
 		Result []struct {
 			ID      string                 `json:"id"`
 			Score   float32                `json:"score"`
-			Payload map[string]interface{} `json:"payload,omitempty"`
+			Payload map[string]interface{} `json:"payload"`
 		} `json:"result"`
-		Time float64 `json:"time"`
+		Status string  `json:"status"`
+		Time   float64 `json:"time"`
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// 使用doRequest方法发送请求
+	err := q.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/search", q.collectionName), searchReq, &result)
 	if err != nil {
-		return nil, fmt.Errorf("读取搜索响应失败: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
-	if err := json.Unmarshal(body, &searchResp); err != nil {
-		return nil, fmt.Errorf("解析搜索响应失败: %w, 内容: %s", err, string(body))
+	// 转换结果格式
+	searchResults := make([]SearchResult, 0, len(result.Result))
+	for _, point := range result.Result {
+		searchResults = append(searchResults, SearchResult{
+			ID:      point.ID,
+			Score:   point.Score,
+			Payload: point.Payload,
+		})
 	}
 
-	// 转换为SearchResult结构
-	results := make([]SearchResult, len(searchResp.Result))
-	for i, r := range searchResp.Result {
-		results[i] = SearchResult{
-			ID:      r.ID,
-			Score:   r.Score,
-			Payload: r.Payload,
-		}
-	}
+	// 记录搜索统计信息
+	span.SetAttributes(
+		attribute.Int("search.results.count", len(searchResults)),
+		attribute.String("qdrant.response_status", result.Status),
+		attribute.Float64("qdrant.response_time", result.Time),
+	)
 
-	return results, nil
+	span.SetStatus(codes.Ok, "")
+	return searchResults, nil
 }
 
-// DeletePoints 删除向量点
+// DeletePoints 删除指定ID的向量点
 func (q *Qdrant) DeletePoints(ctx context.Context, pointIDs []string) error {
+	// 创建一个命名span
+	ctx, span := qdrantTracer.Start(ctx, "Qdrant.DeletePoints",
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	// 添加基础属性
+	span.SetAttributes(
+		attribute.String("db.system", "qdrant"),
+		attribute.String("db.operation", "delete_points"),
+		attribute.String("db.collection", q.collectionName),
+		attribute.Int("points.count", len(pointIDs)),
+	)
+
 	if len(pointIDs) == 0 {
+		span.SetStatus(codes.Ok, "no points to delete")
 		return nil
 	}
 
-	// 构建删除请求
-	deleteRequest := map[string]interface{}{
+	// 构造请求体
+	reqBody := map[string]interface{}{
 		"points": pointIDs,
 	}
 
-	jsonData, err := json.Marshal(deleteRequest)
+	// 执行API调用
+	var result struct {
+		Result struct {
+			Status string `json:"status"`
+		} `json:"result"`
+		Status string  `json:"status"`
+		Time   float64 `json:"time"`
+	}
+
+	// 使用doRequest方法发送请求
+	err := q.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/delete?wait=true", q.collectionName), reqBody, &result)
 	if err != nil {
-		return fmt.Errorf("序列化删除请求失败: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 
-	// 发送请求
-	url := fmt.Sprintf("%s/collections/%s/points/delete?wait=true", q.endpoint, q.collectionName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("创建删除请求失败: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// 记录API响应信息
+	span.SetAttributes(
+		attribute.String("qdrant.response_status", result.Status),
+		attribute.Float64("qdrant.response_time", result.Time),
+	)
 
-	resp, err := q.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("发送删除请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查响应
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("删除点失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
-	}
-
-	log.Printf("成功删除 %d 个向量点", len(pointIDs))
+	span.SetStatus(codes.Ok, "")
 	return nil
 }
 
@@ -458,4 +580,233 @@ func truncateString(s string, maxLen int) string {
 		return s[:maxLen-3] + "..."
 	}
 	return s[:maxLen]
+}
+
+// 定义通用错误
+var (
+	ErrVectorDBNotConfigured = fmt.Errorf("vector database not configured")
+)
+
+// ResumeVectorStore 提供简历向量存储功能
+type ResumeVectorStore struct {
+	VectorDB VectorDatabase
+}
+
+// NewResumeVectorStore 创建一个新的简历向量存储
+func NewResumeVectorStore(vectorDB VectorDatabase) *ResumeVectorStore {
+	return &ResumeVectorStore{
+		VectorDB: vectorDB,
+	}
+}
+
+// StoreResumeVectors 存储简历向量
+func (s *ResumeVectorStore) StoreResumeVectors(ctx context.Context, resumeID string, chunks []types.ResumeChunk, embeddings [][]float64) ([]string, error) {
+	if s.VectorDB == nil {
+		return nil, ErrVectorDBNotConfigured
+	}
+	return s.VectorDB.StoreResumeVectors(ctx, resumeID, chunks, embeddings)
+}
+
+// SearchSimilarResumes 搜索相似简历
+func (s *ResumeVectorStore) SearchSimilarResumes(ctx context.Context, queryVector []float64, limit int, filter map[string]interface{}) ([]SearchResult, error) {
+	if s.VectorDB == nil {
+		return nil, ErrVectorDBNotConfigured
+	}
+	return s.VectorDB.SearchSimilarResumes(ctx, queryVector, limit, filter)
+}
+
+func (q *Qdrant) doRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
+	// 创建请求和span
+	ctx, span := qdrantTracer.Start(ctx, fmt.Sprintf("%s %s", method, path),
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	// 设置span属性
+	span.SetAttributes(
+		attribute.String("net.peer.name", q.endpoint),
+		attribute.String("db.system", "qdrant"),
+		attribute.String("db.operation", path),
+	)
+
+	// 获取BaseURL
+	baseURL := q.endpoint
+
+	// 准备请求
+	var req *http.Request
+	var err error
+
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			tracing.RecordError(span, err, tracing.ErrorTypeVectorDB)
+			return err
+		}
+
+		req, err = http.NewRequestWithContext(ctx, method, baseURL+path, bytes.NewBuffer(jsonBody))
+		if err != nil {
+			tracing.RecordError(span, err, tracing.ErrorTypeVectorDB)
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		span.SetAttributes(attribute.Int("http.request.body.size", len(jsonBody)))
+	} else {
+		req, err = http.NewRequestWithContext(ctx, method, baseURL+path, nil)
+		if err != nil {
+			tracing.RecordError(span, err, tracing.ErrorTypeVectorDB)
+			return err
+		}
+	}
+
+	// 注入trace context
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+	// 执行请求
+	resp, err := q.httpClient.Do(req)
+	if err != nil {
+		tracing.RecordError(span, err, tracing.ErrorTypeHTTP)
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 设置状态码属性
+	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
+
+	// 读取响应
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		tracing.RecordError(span, err, tracing.ErrorTypeHTTP)
+		return err
+	}
+
+	span.SetAttributes(attribute.Int("http.response.body.size", len(respBody)))
+
+	// 检查状态码
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		err = fmt.Errorf("qdrant API error: status=%d, body=%s", resp.StatusCode, string(respBody))
+		tracing.RecordHTTPError(span, err, resp.StatusCode)
+		return err
+	}
+
+	// 解析结果
+	if result != nil && len(respBody) > 0 {
+		if err = json.Unmarshal(respBody, result); err != nil {
+			tracing.RecordError(span, err, tracing.ErrorTypeVectorDB)
+			return err
+		}
+	}
+
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// GetVectorsBySubmissionUUID 通过 submission_uuid 获取所有相关的向量点
+func (q *Qdrant) GetVectorsBySubmissionUUID(ctx context.Context, submissionUUID string) ([]SearchResult, error) {
+	ctx, span := qdrantTracer.Start(ctx, "Qdrant.GetVectorsBySubmissionUUID",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "qdrant"),
+			attribute.String("db.operation", "scroll"),
+			attribute.String("db.collection", q.collectionName),
+			attribute.String("submission_uuid", submissionUUID),
+		),
+	)
+	defer span.End()
+
+	scrollReqBody := map[string]interface{}{
+		"filter": map[string]interface{}{
+			"must": []map[string]interface{}{
+				{
+					"key": "submission_uuid",
+					"match": map[string]interface{}{
+						"value": submissionUUID,
+					},
+				},
+			},
+		},
+		"with_payload": true,
+		"with_vector":  true, // 同时获取向量数据
+		"limit":        100,  // 一个简历通常不会超过100个分块
+	}
+
+	var scrollResp struct {
+		Result struct {
+			Points []struct {
+				ID      string                 `json:"id"`
+				Payload map[string]interface{} `json:"payload"`
+				Vector  []float32              `json:"vector"`
+			} `json:"points"`
+		} `json:"result"`
+		Status string  `json:"status"`
+		Time   float64 `json:"time"`
+	}
+
+	err := q.doRequest(ctx, http.MethodPost, fmt.Sprintf("/collections/%s/points/scroll", q.collectionName), scrollReqBody, &scrollResp)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to scroll points by submission_uuid")
+		return nil, err
+	}
+
+	var results []SearchResult
+	for _, point := range scrollResp.Result.Points {
+		results = append(results, SearchResult{
+			ID:      point.ID,
+			Score:   0, // Scroll 操作没有分数
+			Payload: point.Payload,
+			// Vector: point.Vector, // 可根据需要决定是否返回向量本身
+		})
+	}
+
+	span.SetAttributes(attribute.Int("retrieved_points_count", len(results)))
+	span.SetStatus(codes.Ok, "")
+	return results, nil
+}
+
+// CountPoints 获取集合中的点数量
+func (q *Qdrant) CountPoints(ctx context.Context) (int64, error) {
+	// 创建一个命名span
+	ctx, span := qdrantTracer.Start(ctx, "Qdrant.CountPoints",
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	// 添加基础属性
+	span.SetAttributes(
+		attribute.String("net.peer.name", q.endpoint),
+		attribute.String("db.system", "qdrant"),
+		attribute.String("db.operation", "count_points"),
+		attribute.String("db.collection", q.collectionName),
+	)
+
+	// 构建请求
+	countReqBody := map[string]interface{}{
+		"exact": true, // 精确计数
+	}
+
+	// 执行API调用
+	var result struct {
+		Result struct {
+			Count int64 `json:"count"`
+		} `json:"result"`
+		Status string  `json:"status"`
+		Time   float64 `json:"time"`
+	}
+
+	// 使用doRequest方法发送请求
+	err := q.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/count", q.collectionName), countReqBody, &result)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return 0, err
+	}
+
+	// 记录API响应信息
+	span.SetAttributes(
+		attribute.String("qdrant.response_status", result.Status),
+		attribute.Float64("qdrant.response_time", result.Time),
+		attribute.Int64("qdrant.points.count", result.Result.Count),
+	)
+
+	span.SetStatus(codes.Ok, "")
+	return result.Result.Count, nil
 }

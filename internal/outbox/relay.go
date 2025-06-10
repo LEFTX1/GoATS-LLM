@@ -9,6 +9,10 @@ import (
 
 	"gorm.io/gorm"        // 导入GORM库
 	"gorm.io/gorm/clause" // 导入GORM的子句构建器，如此处的锁
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -25,17 +29,19 @@ type MessageRelay struct {
 	pollingInterval time.Duration     // 轮询间隔
 	batchSize       int               // 批量大小
 	done            chan struct{}     // 用于优雅地停止服务的通道
+	tracer          trace.Tracer      // OpenTelemetry追踪器
 }
 
 // NewMessageRelay 创建一个新的 MessageRelay 实例。
 func NewMessageRelay(db *gorm.DB, publisher *storage.RabbitMQ, logger *log.Logger) *MessageRelay {
 	return &MessageRelay{
-		db:              db,                     // 初始化数据库连接
-		publisher:       publisher,              // 初始化消息发布器
-		logger:          logger,                 // 初始化日志记录器
-		pollingInterval: defaultPollingInterval, // 设置默认轮询间隔
-		batchSize:       defaultBatchSize,       // 设置默认批量大小
-		done:            make(chan struct{}),    // 创建用于停止信号的通道
+		db:              db,                          // 初始化数据库连接
+		publisher:       publisher,                   // 初始化消息发布器
+		logger:          logger,                      // 初始化日志记录器
+		pollingInterval: defaultPollingInterval,      // 设置默认轮询间隔
+		batchSize:       defaultBatchSize,            // 设置默认批量大小
+		done:            make(chan struct{}),         // 创建用于停止信号的通道
+		tracer:          otel.Tracer("outbox-relay"), // 初始化追踪器
 	}
 }
 
@@ -71,6 +77,7 @@ func (r *MessageRelay) processPendingMessages(ctx context.Context) error {
 	var messages []models.OutboxMessage // 用于存储从数据库获取的消息
 
 	// 启动一个数据库事务，以确保获取和更新消息的原子性。
+	// 注意：这里的查询没有包含在追踪Span内，这是故意的，以避免为空轮询创建Span。
 	tx := r.db.WithContext(ctx).Begin()
 	if tx.Error != nil { // 如果开启事务失败
 		return tx.Error
@@ -90,9 +97,20 @@ func (r *MessageRelay) processPendingMessages(ctx context.Context) error {
 		return err
 	}
 
-	if len(messages) > 0 { // 如果获取到了待处理的消息
-		r.logger.Printf("Fetched %d pending messages to process.", len(messages))
+	// 只有在找到要处理的消息时，才开始追踪
+	if len(messages) == 0 {
+		return tx.Commit().Error // 如果没有消息，直接提交空事务并返回
 	}
+
+	// 仅在有消息时创建追踪Span
+	ctx, span := r.tracer.Start(ctx, "outbox.ProcessBatch",
+		trace.WithAttributes(
+			attribute.Int("messaging.batch.message_count", len(messages)),
+		),
+	)
+	defer span.End()
+
+	r.logger.Printf("Fetched %d pending messages to process.", len(messages))
 
 	for _, msg := range messages { // 遍历获取到的消息
 		// 调用发布器将消息发送到消息队列

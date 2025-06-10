@@ -1,6 +1,7 @@
 package processor // 定义了简历处理相关的核心逻辑和组件
 
 import (
+	"ai-agent-go/internal/agent"
 	"ai-agent-go/internal/config"               // 导入项目配置包
 	"ai-agent-go/internal/constants"            // 导入项目常量包
 	parser2 "ai-agent-go/internal/parser"       // 导入解析器包，并重命名为parser2以避免与包名冲突
@@ -9,25 +10,31 @@ import (
 	"ai-agent-go/internal/storage/models"       // 导入数据库模型
 	"ai-agent-go/internal/types"                // 导入项目自定义类型
 	"ai-agent-go/pkg/utils"                     // 导入工具函数包
-	"bytes"                                     // 导入字节缓冲包
-	"context"                                   // 导入上下文包
-	"encoding/json"                             // 导入JSON编解码包
-	"errors"                                    // 导入错误处理包
-	"fmt"                                       // 导入格式化I/O包
-	"io"                                        // 导入I/O接口包
-	"log"                                       // 导入日志包
-	"os"                                        // 导入操作系统功能包
-	"strconv"                                   // 导入字符串转换包
-	"strings"                                   // 导入字符串操作包
-	"time"                                      // 导入时间包
+	"bytes"
 
-	"github.com/cloudwego/eino/components/model" // 导入eino框架的模型组件
-	"github.com/cloudwego/eino/schema"           // 导入eino框架的schema定义
-	"gorm.io/gorm"                               // 导入GORM库
-	"gorm.io/gorm/clause"                        // 导入GORM的子句构建器
+	// 导入字节缓冲包
+	"context"       // 导入上下文包
+	"encoding/json" // 导入JSON编解码包
+	"errors"        // 导入错误处理包
+	"fmt"           // 导入格式化I/O包
+
+	// 导入I/O接口包
+	"log" // 导入日志包
+	"os"  // 导入操作系统功能包
+
+	// 导入字符串转换包
+	// 导入字符串操作包
+	"strconv" // 导入strconv包
+	"time"    // 导入时间包
+
+	// 导入eino框架的模型组件
+	// 导入eino框架的schema定义
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"gorm.io/gorm"        // 导入GORM库
+	"gorm.io/gorm/clause" // 导入GORM的子句构建器
 )
-
-var ErrDuplicateContent = errors.New("duplicate content detected") // 定义一个内容重复的错误
 
 // Components 聚合所有功能组件依赖，便于集中管理和测试替换
 type Components struct {
@@ -74,27 +81,113 @@ type ComponentConfig struct {
 	Logger            *log.Logger // 日志记录器
 }
 
-// ProcessorOption 是 ResumeProcessor 的配置选项
-// type ProcessorOption func(*ResumeProcessor)
-
-// WithStorage 是一个选项，用于设置 ResumeProcessor 的 Storage 依赖
-func WithStorage(s *storage.Storage) ProcessorOption {
-	return func(rp *ResumeProcessor) { // 返回一个配置函数
-		rp.Storage = s // 将传入的storage实例赋值给ResumeProcessor
-	}
+// DefaultResumeEmbedder 是 ResumeEmbedder 接口的默认实现。
+type DefaultResumeEmbedder struct { // 定义 DefaultResumeEmbedder 结构体
+	textEmbedder TextEmbedder // 包含一个 TextEmbedder 接口类型的字段，用于文本嵌入
 }
 
-// WithProcessorLogger sets the logger for the ResumeProcessor.
-// This directly sets the logger in the ComponentConfig.
-func WithProcessorLogger(logger *log.Logger) ProcessorOption { // 为ResumeProcessor设置日志记录器
-	return func(rp *ResumeProcessor) { // 返回一个配置函数
-		if logger != nil { // 如果传入的logger不为空
-			rp.Config.Logger = logger // 则设置为该logger
-		} else { // 否则
-			// Fallback to a discard logger if nil is passed, to prevent panics.
-			rp.Config.Logger = log.New(io.Discard, "[ResumeProcessorNilLoggerFallback] ", log.LstdFlags) // 使用一个丢弃所有日志的logger，防止panic
-		}
+// NewDefaultResumeEmbedder 创建一个新的 DefaultResumeEmbedder 实例。
+func NewDefaultResumeEmbedder(textEmbedder TextEmbedder) (*DefaultResumeEmbedder, error) { // 函数接收 TextEmbedder 参数，返回 DefaultResumeEmbedder 指针和错误
+	if textEmbedder == nil { // 检查传入的 textEmbedder 是否为 nil
+		return nil, fmt.Errorf("textEmbedder cannot be nil") // 如果为 nil，则返回错误信息
 	}
+	return &DefaultResumeEmbedder{textEmbedder: textEmbedder}, nil // 返回新创建的 DefaultResumeEmbedder 实例和 nil 错误
+}
+
+// EmbedResumeChunks 实现了 ResumeEmbedder 接口。
+// 它将简历的各个部分和基本信息转换为文本，然后进行嵌入。
+func (dre *DefaultResumeEmbedder) EmbedResumeChunks(ctx context.Context, sections []*types.ResumeSection, basicInfo map[string]string) ([]*types.ResumeChunkVector, error) { // 方法接收上下文、简历分块和基本信息，返回简历块向量切片和错误
+	if dre.textEmbedder == nil { // 检查 DefaultResumeEmbedder 中的 textEmbedder 是否未初始化
+		return nil, fmt.Errorf("textEmbedder is not initialized in DefaultResumeEmbedder") // 如果未初始化，则返回错误信息
+	}
+
+	var textsToEmbed []string                        // 定义一个字符串切片，用于存储待嵌入的文本
+	var correspondingSections []*types.ResumeSection // 定义一个 ResumeSection 指针切片，用于存储与待嵌入文本对应的原始简历部分
+	// var isBasicInfoChunk []bool // 不再需要标记basicInfo块，因为我们不再单独嵌入它
+
+	// Process resume sections
+	// 处理简历的各个部分
+	for _, section := range sections { // 遍历传入的 sections 切片
+		if section.Content == "" { // 检查当前 section 的内容是否为空
+			continue // 如果内容为空，则跳过当前循环
+		}
+		var textRepresentation string // 定义一个字符串变量，用于存储当前 section 的文本表示
+		if section.Title != "" {      // 检查当前 section 的标题是否不为空
+			// 为了更纯粹的内容嵌入，这里可以考虑是否包含Title，或者仅嵌入Content
+			// 当前保留Title以提供上下文
+			textRepresentation = fmt.Sprintf("Section - %s: %s", section.Title, section.Content) // 如果标题不为空，则将标题和内容格式化为 "Section - [标题]: [内容]" 的形式
+		} else { // 如果标题为空
+			textRepresentation = section.Content // 则直接使用 section 的内容作为文本表示
+		}
+		textsToEmbed = append(textsToEmbed, textRepresentation)        // 将生成的文本表示添加到 textsToEmbed 中
+		correspondingSections = append(correspondingSections, section) // 将当前 section 添加到 correspondingSections 中
+		// isBasicInfoChunk = append(isBasicInfoChunk, false) // 不再需要
+	}
+
+	if len(textsToEmbed) == 0 { // 检查 textsToEmbed 是否为空
+		return []*types.ResumeChunkVector{}, nil // 如果为空，则返回一个空的 ResumeChunkVector 切片和 nil 错误
+	}
+
+	embeddings, err := dre.textEmbedder.EmbedStrings(ctx, textsToEmbed) // 调用 textEmbedder 的 EmbedStrings 方法对 textsToEmbed 中的所有文本进行嵌入
+	if err != nil {                                                     // 检查嵌入过程中是否发生错误
+		return nil, fmt.Errorf("embedding texts failed: %w", err) // 如果发生错误，则返回包装后的错误信息
+	}
+
+	if len(embeddings) != len(textsToEmbed) { // 检查返回的嵌入向量数量是否与待嵌入文本数量一致
+		return nil, fmt.Errorf("embedding count mismatch: expected %d, got %d", len(textsToEmbed), len(embeddings)) // 如果数量不一致，则返回错误信息
+	}
+
+	var resumeChunkVectors []*types.ResumeChunkVector // 定义一个 ResumeChunkVector 指针切片，用于存储最终生成的简历块向量
+	for i, embeddingVector := range embeddings {      // 遍历生成的嵌入向量
+		if len(embeddingVector) == 0 { // 检查当前嵌入向量是否为空
+			continue // 如果为空，则跳过当前循环
+		}
+
+		originalSection := correspondingSections[i] // 获取与当前嵌入向量对应的原始简历部分
+		metadata := make(map[string]interface{})    // 创建一个 map 用于存储元数据
+
+		metadata["original_chunk_type"] = string(originalSection.Type) // 将原始分块类型添加到元数据中
+		if originalSection.Title != "" {                               // 检查原始分块的标题是否不为空
+			metadata["original_chunk_title"] = originalSection.Title // 如果不为空，则将原始分块标题添加到元数据中
+		}
+		if originalSection.ChunkID > 0 { // 检查原始分块的 ChunkID 是否大于0
+			metadata["llm_chunk_id"] = originalSection.ChunkID // 如果大于0，则将 llm_chunk_id 添加到元数据中
+		}
+		if originalSection.ResumeIdentifier != "" { // 检查原始分块的简历标识符是否不为空
+			// ResumeIdentifier 通常从 basicInfo 中来，这里确保它被正确关联
+			metadata["llm_resume_identifier"] = originalSection.ResumeIdentifier
+		} else if biRI, ok := basicInfo["resume_identifier"]; ok && biRI != "" {
+			// 如果 section 本身没有，尝试从 basicInfo 获取
+			metadata["llm_resume_identifier"] = biRI
+		}
+
+		// 将 basicInfo 中的相关信息添加到每个 chunk 的 metadata 中
+		// 这是因为 basicInfo 现在不单独生成向量，但其信息对每个 chunk 都可能有用
+		if basicInfo != nil { // 如果基本信息不为空
+			for k, v := range basicInfo { // 遍历基本信息
+				// 避免覆盖上面已经从 originalSection 设置的字段，除非特定需要
+				if _, exists := metadata[k]; !exists { // 如果元数据中不存在该键
+					metadata[k] = v // 则添加
+				}
+			}
+		}
+		// 确保一些关键的 basicInfo 字段（如果存在）被包含
+		// 例如，如果 "name", "phone", "email" 等字段在 basicInfo 中，它们会在这里被加入 metadata
+		// 也可以选择性地只添加 "valuableBasicKeys" 对应的字段到metadata
+
+		resumeChunkVectors = append(resumeChunkVectors, &types.ResumeChunkVector{ // 创建一个新的 ResumeChunkVector 并将其指针添加到 resumeChunkVectors 中
+			Section:  originalSection, // 设置原始简历部分
+			Vector:   embeddingVector, // 设置嵌入向量
+			Metadata: metadata,        // 设置元数据
+		})
+	}
+
+	return resumeChunkVectors, nil // 返回生成的简历块向量切片和 nil 错误
+}
+
+// Embed 是 EmbedResumeChunks 的别名，用于满足 ResumeEmbedder 接口。
+func (dre *DefaultResumeEmbedder) Embed(ctx context.Context, sections []*types.ResumeSection, basicInfo map[string]string) ([]*types.ResumeChunkVector, error) { // 定义 Embed 方法，参数和返回值与 EmbedResumeChunks 一致
+	return dre.EmbedResumeChunks(ctx, sections, basicInfo) // 调用 EmbedResumeChunks 方法并返回其结果
 }
 
 // NewResumeProcessorV2 创建新的简历处理器，使用明确分离的组件和设置
@@ -165,48 +258,6 @@ func NewResumeProcessor(options ...ProcessorOption) *ResumeProcessor {
 	return processor // 返回创建的处理器实例
 }
 
-// LogDebug 记录调试日志
-func (rp *ResumeProcessor) LogDebug(message string) {
-	if rp.Config.Debug && rp.Config.Logger != nil { // 如果开启了调试模式且logger不为空
-		rp.Config.Logger.Println(message) // 则记录日志
-	}
-}
-
-// 新增统一的日志包装方法
-// logDebug 记录调试级别日志
-func (rp *ResumeProcessor) logDebug(format string, args ...interface{}) {
-	if rp.Config.Debug && rp.Config.Logger != nil {
-		rp.Config.Logger.Printf(format, args...)
-	}
-}
-
-// logInfo 记录信息级别日志
-func (rp *ResumeProcessor) logInfo(format string, args ...interface{}) {
-	if rp.Config.Logger != nil {
-		rp.Config.Logger.Printf(format, args...)
-	}
-}
-
-// logWarn 记录警告级别日志
-func (rp *ResumeProcessor) logWarn(format string, args ...interface{}) {
-	if rp.Config.Logger != nil {
-		rp.Config.Logger.Printf("[WARN] "+format, args...)
-	}
-}
-
-// logError 记录错误级别日志
-func (rp *ResumeProcessor) logError(err error, format string, args ...interface{}) {
-	if rp.Config.Logger != nil {
-		// 如果提供了错误对象，先添加错误信息
-		if err != nil {
-			format = fmt.Sprintf("ERROR: %v - %s", err, format)
-		} else {
-			format = "ERROR: " + format
-		}
-		rp.Config.Logger.Printf(format, args...)
-	}
-}
-
 // 示例使用 V2 API：
 //
 // 在 main.go 或初始化代码中:
@@ -258,45 +309,6 @@ func (rp *ResumeProcessor) logError(err error, format string, args ...interface{
 
 // 工厂方法 - 创建处理器的辅助函数
 
-// CreateDefaultProcessor 创建默认配置的简历处理器组件集合
-func CreateDefaultProcessor(ctx context.Context, cfg *config.Config, storageManager *storage.Storage) (*ResumeProcessor, error) {
-	// 1. 创建组件实例
-	components := &Components{ // 初始化组件结构体
-		Storage: storageManager, // 设置存储管理器
-	}
-
-	// 2. 创建设置实例
-	settings := &Settings{ // 初始化设置结构体
-		UseLLM:            true,                                              // 默认启用LLM
-		DefaultDimensions: 1536,                                              // 默认向量维度
-		Debug:             true,                                              // 默认开启调试模式
-		Logger:            log.New(os.Stdout, "[Processor] ", log.LstdFlags), // 默认logger
-		TimeLocation:      time.Local,                                        // 默认本地时区
-	}
-
-	// 3. 创建PDF提取器
-	var err error
-	// 使用统一的PDF解析器构建函数
-	components.PDFExtractor, err = BuildPDFExtractor(ctx, cfg, func(prefix string) *log.Logger {
-		return log.New(os.Stdout, prefix, log.LstdFlags)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("创建PDF提取器失败: %w", err)
-	}
-
-	// 4. 创建mock LLM模型
-	mockLLM := &MockLLMModel{} // 实例化一个mock LLM模型
-
-	// 5. 创建LLM分块器
-	discardLogger := log.New(io.Discard, "", 0)                                    // 创建一个丢弃日志的logger
-	components.ResumeChunker = parser2.NewLLMResumeChunker(mockLLM, discardLogger) // 创建LLM简历分块器
-
-	// 6. 使用新的构造函数创建处理器
-	processor := NewResumeProcessorV2(components, settings) // 调用V2构造函数
-
-	return processor, nil // 返回处理器和nil错误
-}
-
 // CreateProcessorFromConfig 从配置创建处理器组件集合
 func CreateProcessorFromConfig(ctx context.Context, cfg *config.Config, storageManager *storage.Storage) (*ResumeProcessor, error) {
 	if cfg == nil { // 检查配置是否为空
@@ -304,7 +316,7 @@ func CreateProcessorFromConfig(ctx context.Context, cfg *config.Config, storageM
 	}
 
 	// 1. 创建组件实例
-	components := &Components{ // 初始化组件
+	components := &Components{ // 初始化组件结构体
 		Storage: storageManager, // 设置存储管理器
 	}
 
@@ -327,15 +339,49 @@ func CreateProcessorFromConfig(ctx context.Context, cfg *config.Config, storageM
 		return nil, fmt.Errorf("创建PDF提取器失败: %w", err)
 	}
 
-	// 4. 创建处理器
-	processor := NewResumeProcessorV2(components, settings) // 调用V2构造函数创建处理器
+	// 4. 如果配置了API密钥，添加LLM功能
+	if cfg.Aliyun.APIKey != "" {
+		settings.Logger.Println("检测到API密钥，配置LLM功能...")
 
-	// 5. 如果配置了API密钥，添加LLM功能
-	if cfg.Aliyun.APIKey != "" { // 检查阿里云API密钥是否存在
-		// 这里可以创建LLM模型、分块器、嵌入器和评估器，使用新的组件设置方式
-		processor.Config.Logger.Println("检测到API密钥，准备配置LLM功能")
-		// 此处可以增加更多的LLM组件初始化
+		// 创建用于分块的千问模型
+		chunkerModel, err := agent.NewAliyunQwenChatModel(
+			cfg.Aliyun.APIKey,
+			cfg.GetModelForTask("resume_chunking"),
+			cfg.Aliyun.APIURL,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("创建分块LLM模型失败: %w", err)
+		}
+		chunkerLogger := log.New(os.Stdout, "[LLMChunker] ", log.LstdFlags)
+		components.ResumeChunker = parser2.NewLLMResumeChunker(chunkerModel, chunkerLogger)
+
+		// 创建用于评估的千问模型
+		evaluatorModel, err := agent.NewAliyunQwenChatModel(
+			cfg.Aliyun.APIKey,
+			cfg.GetModelForTask("job_evaluate"),
+			cfg.Aliyun.APIURL,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("创建评估LLM模型失败: %w", err)
+		}
+		evaluatorLogger := log.New(os.Stdout, "[JobEvaluator] ", log.LstdFlags)
+		components.MatchEvaluator = parser2.NewLLMJobEvaluator(evaluatorModel, evaluatorLogger)
+
+		// 创建简历嵌入器
+		aliyunEmbedder, err := parser2.NewAliyunEmbedder(cfg.Aliyun.APIKey, cfg.Aliyun.Embedding)
+		if err != nil {
+			return nil, fmt.Errorf("创建阿里云嵌入器失败: %w", err)
+		}
+		// NewDefaultResumeEmbedder 位于 resume_service.go 中，但在同一个包内，可以直接调用
+		resumeEmbedder, embedErr := NewDefaultResumeEmbedder(aliyunEmbedder)
+		if embedErr != nil {
+			return nil, fmt.Errorf("创建简历嵌入器失败: %w", embedErr)
+		}
+		components.ResumeEmbedder = resumeEmbedder
 	}
+
+	// 5. 创建处理器
+	processor := NewResumeProcessorV2(components, settings)
 
 	return processor, nil // 返回创建的处理器和nil错误
 }
@@ -343,91 +389,6 @@ func CreateProcessorFromConfig(ctx context.Context, cfg *config.Config, storageM
 // NewProcessorFromConfig 是 CreateProcessorFromConfig 的别名，保持向后兼容性
 func NewProcessorFromConfig(ctx context.Context, cfg *config.Config, storageManager *storage.Storage) (*ResumeProcessor, error) {
 	return CreateProcessorFromConfig(ctx, cfg, storageManager) // 直接调用CreateProcessorFromConfig函数
-}
-
-// MockLLMModel 是一个模拟的LLM模型，用于测试目的
-type MockLLMModel struct{}
-
-// Generate 模拟LLM的响应生成
-func (m *MockLLMModel) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
-	// 默认返回简历分块的 mock JSON
-	responseContent := `{
-		"basic_info": {
-			"name": "Mock User",
-			"phone": "12345678900",
-			"email": "mock.user@example.com",
-			"education_level": "本科",
-			"position": "软件工程师"
-		},
-		"chunks": [
-			{
-				"chunk_id": 1,
-				"resume_identifier": "Mock User_12345678900",
-				"type": "BASIC_INFO",
-				"title": "基本信息",
-				"content": "Mock User, 12345678900, mock.user@example.com, 软件工程师"
-			},
-			{
-				"chunk_id": 2,
-				"resume_identifier": "Mock User_12345678900",
-				"type": "EDUCATION",
-				"title": "教育经历",
-				"content": "Mock University, 计算机科学, 本科, 2018-2022"
-			}
-		],
-		"metadata": {
-			"is_211": false,
-			"is_985": false,
-			"is_double_top": false,
-			"has_intern": true,
-			"highest_education": "本科",
-			"years_of_experience": 1.5,
-			"resume_score": 75,
-			"tags": ["Go", "Python"]
-		}
-	}`
-
-	// 检查是否为 JD-简历匹配度评估场景
-	if len(messages) > 0 { // 如果有消息
-		for _, msg := range messages { // 遍历消息
-			if msg.Role == "system" { // 如果是系统角色
-				// 使用您建议的关键词检查
-				// 另外也加入 "你是一位极其资深的AI招聘专家" 作为补充判断条件，因为这是 job_evaluator.go 中模板的开头
-				if strings.Contains(msg.Content, "岗位–简历匹配度评估") || strings.Contains(msg.Content, "你是一位极其资深的AI招聘专家") {
-					responseContent = `{
-						"match_score": 85,
-						"match_highlights": [
-							"Go & Python skills align with JD",
-							"2 years experience meets requirement"
-						],
-						"potential_gaps": [],
-						"resume_summary_for_jd": "This candidate shows good alignment with the job description, particularly in technical skills (Go, Python) and relevant experience duration."
-					}`
-					break // 找到匹配场景后退出循环
-				}
-			}
-		}
-	}
-
-	return &schema.Message{ // 返回一个schema.Message指针
-		Role:    "assistant",     // 角色为助手
-		Content: responseContent, // 内容为上面定义的JSON字符串
-	}, nil
-}
-
-// Stream 模拟LLM的流式响应 (当前未实现详细逻辑，可根据需要扩展)
-func (m *MockLLMModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return nil, fmt.Errorf("stream not implemented in mock") // 返回未实现的错误
-}
-
-// WithTools 实现 model.ToolCallingChatModel 接口
-func (m *MockLLMModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return m, nil // 返回自身和nil错误
-}
-
-// BindTools 实现 model.ChatModel 接口
-func (m *MockLLMModel) BindTools(tools []*schema.ToolInfo) error {
-	return nil // 直接返回nil
 }
 
 // ProcessUploadedResume 接收上传消息，完成文本提取、去重、发送到LLM队列的完整流程
@@ -523,43 +484,73 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 	return nil // 所有操作成功，返回nil
 }
 
-// _parseAndDeduplicateResume an internal helper to extract text, check for duplicates, and return the text and its MD5.
-// It returns a special ErrDuplicateContent if the text content is a duplicate.
-func (rp *ResumeProcessor) _parseAndDeduplicateResume(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeUploadMessage) (string, string, error) { // 解析和去重简历的内部辅助函数
-	originalFileBytes, err := rp.Storage.MinIO.GetResumeFile(ctx, message.OriginalFilePathOSS) // 从MinIO获取原始简历文件
-	if err != nil {                                                                            // 如果获取失败
+// _parseAndDeduplicateResume 解析简历文本，去重，并将结果上传。
+// 它返回一个特殊的 ErrDuplicateContent 错误，如果文本内容是重复的。
+func (rp *ResumeProcessor) _parseAndDeduplicateResume(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeUploadMessage) (string, string, error) {
+	ctx, span := tracer.Start(ctx, "ResumeProcessor._parseAndDeduplicateResume")
+	defer span.End()
+
+	// 步骤 1: 从MinIO下载简历文件
+	originalFileBytes, err := rp.Storage.MinIO.GetResumeFile(ctx, message.OriginalFilePathOSS)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to download resume file")
 		rp.logDebug("从MinIO下载简历 %s 失败: %v", message.SubmissionUUID, err)
-		return "", "", NewDownloadError(message.SubmissionUUID, err.Error()) // 返回下载错误
+		return "", "", NewDownloadError(message.SubmissionUUID, err.Error())
 	}
+	span.AddEvent("file content downloaded")
 	rp.logDebug("简历 %s 从MinIO下载成功，大小: %d bytes", message.SubmissionUUID, len(originalFileBytes))
 
-	text, _, err := rp.PDFExtractor.ExtractTextFromReader(ctx, bytes.NewReader(originalFileBytes), message.OriginalFilePathOSS, nil) // 从文件字节流中提取文本
-	if err != nil {                                                                                                                  // 如果提取失败
+	// 步骤 2: 使用注入的 PDFExtractor 提取文本
+	parsedText, _, err := rp.PDFExtractor.ExtractTextFromReader(ctx, bytes.NewReader(originalFileBytes), message.OriginalFilePathOSS, nil)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to extract text from PDF")
 		rp.logDebug("ProcessUploadedResume: 提取简历文本失败 for %s: %v", message.SubmissionUUID, err)
-		return "", "", NewParseError(message.SubmissionUUID, err.Error()) // 返回解析错误
+		return "", "", NewParseError(message.SubmissionUUID, err.Error())
 	}
-	rp.logDebug("ProcessUploadedResume: 成功提取文本 for %s, 长度: %d", message.SubmissionUUID, len(text))
+	span.AddEvent("parsed text extracted")
+	rp.logDebug("ProcessUploadedResume: 成功提取文本 for %s, 长度: %d", message.SubmissionUUID, len(parsedText))
 
-	textMD5Hex := utils.CalculateMD5([]byte(text)) // 计算提取出文本的MD5值
-	rp.logDebug("ProcessUploadedResume: 计算得到文本MD5 %s for %s", textMD5Hex, message.SubmissionUUID)
+	// 步骤 3: 使用专用的、带BOM的方法将提取的文本上传到 Minio
+	_, err = rp.Storage.MinIO.UploadParsedText(ctx, message.SubmissionUUID, parsedText)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to upload parsed text")
+		return "", "", fmt.Errorf("上传解析后的文本到MinIO失败: %w", err)
+	}
+	span.AddEvent("parsed text uploaded")
 
-	textExists, err := rp.Storage.Redis.CheckAndAddParsedTextMD5(ctx, textMD5Hex) // 在Redis中原子地检查并添加文本MD5
-	if err != nil {                                                               // 如果Redis操作失败
+	// 步骤 4: 计算解析后文本的MD5并去重
+	parsedTextMD5 := utils.CalculateMD5([]byte(parsedText))
+	rp.logDebug("ProcessUploadedResume: 计算得到文本MD5 %s for %s", parsedTextMD5, message.SubmissionUUID)
+
+	textExists, err := rp.Storage.Redis.CheckAndAddParsedTextMD5(ctx, parsedTextMD5)
+	if err != nil {
 		rp.logDebug("ProcessUploadedResume: 使用Redis原子操作检查文本MD5失败 for %s: %v, 将继续处理，但文本去重可能失效", message.SubmissionUUID, err)
-	} else if textExists { // 如果文本已存在
-		rp.logDebug("ProcessUploadedResume: 检测到重复的文本MD5 %s for %s，标记为重复内容", textMD5Hex, message.SubmissionUUID)
-		if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Update("processing_status", constants.StatusContentDuplicateSkipped).Error; err != nil { // 更新数据库状态为内容重复跳过
-			return "", "", NewUpdateError(message.SubmissionUUID, "更新重复内容状态失败") // 返回更新错误
+	} else if textExists {
+		rp.logDebug("ProcessUploadedResume: 检测到重复的文本MD5 %s for %s，标记为重复内容", parsedTextMD5, message.SubmissionUUID)
+		if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Update("processing_status", constants.StatusContentDuplicateSkipped).Error; err != nil {
+			return "", "", NewUpdateError(message.SubmissionUUID, "更新重复内容状态失败")
 		}
-		return "", "", ErrDuplicateContent // 返回内容重复的特定错误
+		return "", "", ErrDuplicateContent
 	}
-	rp.logDebug("ProcessUploadedResume: 文本MD5 %s 不存在于Redis, 继续处理 for %s", textMD5Hex, message.SubmissionUUID)
-	return text, textMD5Hex, nil // 返回提取的文本、其MD5和nil错误
+	rp.logDebug("ProcessUploadedResume: 文本MD5 %s 不存在于Redis, 继续处理 for %s", parsedTextMD5, message.SubmissionUUID)
+
+	return parsedText, parsedTextMD5, nil
 }
 
 // ProcessLLMTasks 接收LLM处理消息，完成分块、评估、存储向量和结果的完整流程
 // 使用数据库事务确保所有状态更新的原子性
 func (rp *ResumeProcessor) ProcessLLMTasks(ctx context.Context, message storagetypes.ResumeProcessingMessage, cfg *config.Config) error {
+	ctx, span := tracer.Start(ctx, "ResumeProcessor.ProcessLLMTasks",
+		trace.WithAttributes(
+			attribute.String("submission_uuid", message.SubmissionUUID),
+			attribute.String("target_job_id", message.TargetJobID),
+		),
+	)
+	defer span.End()
+
 	rp.logDebug("[ProcessLLMTasks] 开始处理LLM任务 for %s, 目标Job ID: %s", message.SubmissionUUID, message.TargetJobID)
 
 	// 使用事务来保证读取-更新的原子性和幂等性
@@ -703,6 +694,30 @@ func (rp *ResumeProcessor) _embedChunks(ctx context.Context, sections []*types.R
 	if rp.ResumeEmbedder == nil { // 检查嵌入器是否初始化
 		return nil, fmt.Errorf("ResumeEmbedder未初始化")
 	}
+
+	// 筛选非 BASIC_INFO 类型的分块
+	// 注释：我们可以选择在这里过滤掉 BASIC_INFO 分块，但为了保持向后兼容，
+	// 我们依然对所有分块进行向量化，并在 _prepareQdrantData 中进行过滤。
+	// 未来可以取消下面的注释，启用过滤，以节约API调用和计算资源。
+	/*
+		var sectionsToEmbed []*types.ResumeSection
+		for _, section := range sections {
+			if section.Type != types.SectionBasicInfo {
+				sectionsToEmbed = append(sectionsToEmbed, section)
+			} else if rp.Config.Debug {
+				rp.Config.Logger.Printf("在向量化阶段跳过BASIC_INFO分块，分块ID: %d", section.ChunkID)
+			}
+		}
+
+		if len(sectionsToEmbed) == 0 {
+			return nil, fmt.Errorf("过滤BASIC_INFO后没有可向量化的分块")
+		}
+
+		// 调用嵌入器进行向量化，只处理非 BASIC_INFO 分块
+		return rp.ResumeEmbedder.Embed(ctx, sectionsToEmbed, basicInfo)
+	*/
+
+	// 当前实现：对所有分块进行向量化
 	chunkEmbeddings, embedErr := rp.ResumeEmbedder.Embed(ctx, sections, basicInfo) // 调用嵌入器进行向量化
 	if embedErr != nil {                                                           // 如果失败
 		rp.logInfo("ProcessLLMTasks: 向量嵌入失败: %v", embedErr)
@@ -721,6 +736,26 @@ func (rp *ResumeProcessor) _executeLLMProcessingTransaction(ctx context.Context,
 	// 此处PointID已通过外部Qdrant.StoreResumeVectors调用获取并传入
 	// 不再需要从qdrantChunks中提取
 
+	// 1. 查找或创建候选人
+	var candidateID string
+	if basicInfo != nil {
+		// 确保至少有一个联系方式
+		email, emailOk := basicInfo["email"]
+		phone, phoneOk := basicInfo["phone"]
+
+		if emailOk && email != "" || phoneOk && phone != "" {
+			candidate, err := rp.Storage.MySQL.FindOrCreateCandidate(ctx, tx, basicInfo)
+			if err != nil {
+				rp.logInfo("ProcessLLMTasks: 查找或创建候选人失败 for %s: %v", message.SubmissionUUID, err)
+				return fmt.Errorf("查找或创建候选人失败: %w", err)
+			}
+			if candidate != nil {
+				candidateID = candidate.CandidateID
+				rp.logDebug("[ProcessLLMTasks] 成功关联候选人 %s for submission %s", candidateID, message.SubmissionUUID)
+			}
+		}
+	}
+
 	// 2. 保存简历分块到MySQL
 	if err := rp.Storage.MySQL.SaveResumeChunks(tx, message.SubmissionUUID, sections, pointIDs); err != nil { // 保存分块信息到MySQL
 		rp.logInfo("ProcessLLMTasks: 保存简历分块到MySQL失败 for %s: %v", message.SubmissionUUID, err)
@@ -729,7 +764,7 @@ func (rp *ResumeProcessor) _executeLLMProcessingTransaction(ctx context.Context,
 	rp.logDebug("[ProcessLLMTasks] 成功保存 %d 个简历分块信息到MySQL for %s", len(sections), message.SubmissionUUID)
 
 	// 3. 准备并执行最终的数据库更新
-	updates := rp._prepareFinalDBUpdates(basicInfo, pointIDs)                                                                                // 准备最终更新的数据
+	updates := rp._prepareFinalDBUpdates(basicInfo, pointIDs, candidateID)                                                                   // 准备最终更新的数据
 	if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Updates(updates).Error; err != nil { // 执行更新
 		rp.logInfo("ProcessLLMTasks: 最终更新数据库失败 for %s: %v", message.SubmissionUUID, err)
 		return fmt.Errorf("最终更新数据库失败: %w", err)
@@ -752,9 +787,12 @@ func (rp *ResumeProcessor) _executeLLMProcessingTransaction(ctx context.Context,
 	return nil // 返回nil表示成功
 }
 
-func (rp *ResumeProcessor) _prepareFinalDBUpdates(basicInfo map[string]string, pointIDs []string) map[string]interface{} { // 准备最终的数据库更新内容
+func (rp *ResumeProcessor) _prepareFinalDBUpdates(basicInfo map[string]string, pointIDs []string, candidateID string) map[string]interface{} { // 准备最终的数据库更新内容
 	updates := make(map[string]interface{}) // 创建一个map用于存储更新
-	if basicInfo != nil {                   // 如果有基本信息
+	if candidateID != "" {
+		updates["candidate_id"] = candidateID
+	}
+	if basicInfo != nil { // 如果有基本信息
 		name, nameOk := basicInfo["name"]                   // 获取姓名
 		phone, phoneOk := basicInfo["phone"]                // 获取电话
 		identifier := ""                                    // 初始化标识符
@@ -785,60 +823,88 @@ func (rp *ResumeProcessor) _prepareFinalDBUpdates(basicInfo map[string]string, p
 }
 
 // _prepareQdrantData prepares the data structures needed for Qdrant storage.
-func (rp *ResumeProcessor) _prepareQdrantData(submissionUUID string, sections []*types.ResumeSection, basicInfo map[string]string, chunkEmbeddings []*types.ResumeChunkVector) ([]types.ResumeChunk, [][]float64, error) { // 准备用于Qdrant的数据
-	if len(chunkEmbeddings) == 0 { // 如果没有向量数据
-		return nil, nil, fmt.Errorf("没有有效的向量数据") // 返回错误
+func (rp *ResumeProcessor) _prepareQdrantData(submissionUUID string, sections []*types.ResumeSection, basicInfo map[string]string, chunkEmbeddings []*types.ResumeChunkVector) ([]types.ResumeChunk, [][]float64, error) {
+	if len(chunkEmbeddings) == 0 {
+		return nil, nil, fmt.Errorf("没有有效的向量数据")
 	}
 
-	qdrantChunks := make([]types.ResumeChunk, len(sections))   // 创建Qdrant分块切片
-	floatEmbeddings := make([][]float64, len(chunkEmbeddings)) // 创建浮点数向量切片
+	// 创建用于存储的切片
+	var chunks []types.ResumeChunk
+	var embeddings [][]float64
 
-	var globalExpYears int                                                   // 全局工作年限
-	var globalEduLevel, candidateName, candidatePhone, candidateEmail string // 全局学历、姓名、电话、邮箱
+	var globalExpYears int
+	var globalEduLevel, candidateName, candidatePhone, candidateEmail string
 
-	if basicInfo != nil { // 如果有基本信息
-		if expStr, ok := basicInfo["years_of_experience"]; ok { // 获取工作年限字符串
-			if expFloat, err := strconv.ParseFloat(expStr, 64); err == nil { // 解析为浮点数
-				globalExpYears = int(expFloat) // 转换为整数
+	if basicInfo != nil {
+		if expStr, ok := basicInfo["years_of_experience"]; ok {
+			if expFloat, err := strconv.ParseFloat(expStr, 64); err == nil {
+				globalExpYears = int(expFloat)
 			}
 		}
-		globalEduLevel, _ = basicInfo["highest_education"] // 获取最高学历
-		candidateName, _ = basicInfo["name"]               // 获取姓名
-		candidatePhone, _ = basicInfo["phone"]             // 获取电话
-		candidateEmail, _ = basicInfo["email"]             // 获取邮箱
+		globalEduLevel, _ = basicInfo["highest_education"]
+		candidateName, _ = basicInfo["name"]
+		candidatePhone, _ = basicInfo["phone"]
+		candidateEmail, _ = basicInfo["email"]
 	}
 
-	for i, section := range sections { // 遍历所有分块
-		if i < len(chunkEmbeddings) && chunkEmbeddings[i] != nil && chunkEmbeddings[i].Vector != nil { // 检查向量是否存在
-			floatEmbeddings[i] = chunkEmbeddings[i].Vector // 赋值向量
-		} else { // 如果不存在
-			floatEmbeddings[i] = make([]float64, rp.Config.DefaultDimensions) // 创建一个默认的空向量
+	// 遍历处理每个分块向量
+	for i, chunkVector := range chunkEmbeddings {
+		// 跳过 BASIC_INFO 类型的分块，不存储到向量数据库
+		if chunkVector.Section != nil && chunkVector.Section.Type == types.SectionBasicInfo {
+			if rp.Config.Debug {
+				rp.Config.Logger.Printf("跳过BASIC_INFO分块，不存入向量数据库, 分块ID: %d", i+1)
+			}
+			continue
+		}
+
+		// 使用向量
+		vectors := chunkVector.Vector
+		if vectors == nil || len(vectors) == 0 {
+			// 创建一个默认的空向量
+			vectors = make([]float64, rp.Config.DefaultDimensions)
 			rp.logInfo("ProcessLLMTasks: 发现空嵌入向量 at index %d for %s, 使用默认空向量", i, submissionUUID)
 		}
 
-		qdrantChunks[i] = types.ResumeChunk{ // 创建Qdrant分块
-			ChunkID:           section.ChunkID,                                                                      // 分块ID
-			ChunkType:         string(section.Type),                                                                 // 分块类型
-			Content:           section.Content,                                                                      // 内容
-			UniqueIdentifiers: types.Identity{Name: candidateName, Phone: candidatePhone, Email: candidateEmail},    // 唯一标识
-			Metadata:          types.ChunkMetadata{ExperienceYears: globalExpYears, EducationLevel: globalEduLevel}, // 元数据
+		// 创建分块数据
+		chunk := types.ResumeChunk{
+			ChunkID:   chunkVector.Section.ChunkID,
+			ChunkType: string(chunkVector.Section.Type),
+			Content:   chunkVector.Section.Content,
+			UniqueIdentifiers: types.Identity{
+				Name:  candidateName,
+				Phone: candidatePhone,
+				Email: candidateEmail,
+			},
+			Metadata: types.ChunkMetadata{
+				ExperienceYears: globalExpYears,
+				EducationLevel:  globalEduLevel,
+			},
 		}
 
-		if i < len(chunkEmbeddings) && chunkEmbeddings[i] != nil && chunkEmbeddings[i].Metadata != nil { // 检查向量的元数据是否存在
-			if specificExp, ok := chunkEmbeddings[i].Metadata["experience_years"].(int); ok { // 获取特定经验年限
-				qdrantChunks[i].Metadata.ExperienceYears = specificExp // 赋值
+		// 添加特定的元数据信息（如果存在）
+		if chunkVector.Metadata != nil {
+			if specificExp, ok := chunkVector.Metadata["experience_years"].(int); ok {
+				chunk.Metadata.ExperienceYears = specificExp
 			}
-			if specificEdu, ok := chunkEmbeddings[i].Metadata["education_level"].(string); ok { // 获取特定学历
-				qdrantChunks[i].Metadata.EducationLevel = specificEdu // 赋值
+			if specificEdu, ok := chunkVector.Metadata["education_level"].(string); ok {
+				chunk.Metadata.EducationLevel = specificEdu
 			}
-			if score, ok := chunkEmbeddings[i].Metadata["importance_score"].(float32); ok { // 获取重要性分数
-				qdrantChunks[i].ImportanceScore = score // 赋值
-			} else if scoreF64, ok := chunkEmbeddings[i].Metadata["importance_score"].(float64); ok { // 或者float64类型
-				qdrantChunks[i].ImportanceScore = float32(scoreF64) // 转换为float32并赋值
+			if score, ok := chunkVector.Metadata["importance_score"].(float32); ok {
+				chunk.ImportanceScore = score
+			} else if scoreF64, ok := chunkVector.Metadata["importance_score"].(float64); ok {
+				chunk.ImportanceScore = float32(scoreF64)
 			}
 		}
+
+		chunks = append(chunks, chunk)
+		embeddings = append(embeddings, vectors)
 	}
-	return qdrantChunks, floatEmbeddings, nil // 返回准备好的数据
+
+	if len(chunks) == 0 {
+		return nil, nil, fmt.Errorf("过滤BASIC_INFO后没有可存储的分块")
+	}
+
+	return chunks, embeddings, nil
 }
 
 // _saveMatchEvaluation handles the logic for fetching JD, evaluating match, and saving the result.

@@ -55,7 +55,7 @@ func NewStorage(ctx context.Context, cfg *config.Config) (*Storage, error) {
 	}
 
 	// 初始化MinIO
-	storage.MinIO, err = NewMinIO(&cfg.MinIO, minioLogger)
+	storage.MinIO, err = NewMinIO(ctx, &cfg.MinIO, minioLogger)
 	if err != nil {
 		log.Printf("警告: 初始化MinIO失败: %v", err)
 		initErrors = append(initErrors, fmt.Sprintf("MinIO: %v", err))

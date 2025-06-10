@@ -2,6 +2,8 @@ package processor
 
 import (
 	"ai-agent-go/internal/storage"
+	"fmt"
+	"io"
 	"log"
 	"time"
 )
@@ -196,5 +198,70 @@ func WithLogger(logger *log.Logger) ProcessorOption {
 func WithDefaultDimensions(dimensions int) ProcessorOption {
 	return func(p *ResumeProcessor) {
 		p.Config.DefaultDimensions = dimensions
+	}
+}
+
+// ProcessorOption 是 ResumeProcessor 的配置选项
+// type ProcessorOption func(*ResumeProcessor)
+
+// WithStorage 是一个选项，用于设置 ResumeProcessor 的 Storage 依赖
+func WithStorage(s *storage.Storage) ProcessorOption {
+	return func(rp *ResumeProcessor) { // 返回一个配置函数
+		rp.Storage = s // 将传入的storage实例赋值给ResumeProcessor
+	}
+}
+
+// WithProcessorLogger sets the logger for the ResumeProcessor.
+// This directly sets the logger in the ComponentConfig.
+func WithProcessorLogger(logger *log.Logger) ProcessorOption { // 为ResumeProcessor设置日志记录器
+	return func(rp *ResumeProcessor) { // 返回一个配置函数
+		if logger != nil { // 如果传入的logger不为空
+			rp.Config.Logger = logger // 则设置为该logger
+		} else { // 否则
+			// Fallback to a discard logger if nil is passed, to prevent panics.
+			rp.Config.Logger = log.New(io.Discard, "[ResumeProcessorNilLoggerFallback] ", log.LstdFlags) // 使用一个丢弃所有日志的logger，防止panic
+		}
+	}
+}
+
+// LogDebug 记录调试日志
+func (rp *ResumeProcessor) LogDebug(message string) {
+	if rp.Config.Debug && rp.Config.Logger != nil { // 如果开启了调试模式且logger不为空
+		rp.Config.Logger.Println(message) // 则记录日志
+	}
+}
+
+// 新增统一的日志包装方法
+// logDebug 记录调试级别日志
+func (rp *ResumeProcessor) logDebug(format string, args ...interface{}) {
+	if rp.Config.Debug && rp.Config.Logger != nil {
+		rp.Config.Logger.Printf(format, args...)
+	}
+}
+
+// logInfo 记录信息级别日志
+func (rp *ResumeProcessor) logInfo(format string, args ...interface{}) {
+	if rp.Config.Logger != nil {
+		rp.Config.Logger.Printf(format, args...)
+	}
+}
+
+// logWarn 记录警告级别日志
+func (rp *ResumeProcessor) logWarn(format string, args ...interface{}) {
+	if rp.Config.Logger != nil {
+		rp.Config.Logger.Printf("[WARN] "+format, args...)
+	}
+}
+
+// logError 记录错误级别日志
+func (rp *ResumeProcessor) logError(err error, format string, args ...interface{}) {
+	if rp.Config.Logger != nil {
+		// 如果提供了错误对象，先添加错误信息
+		if err != nil {
+			format = fmt.Sprintf("ERROR: %v - %s", err, format)
+		} else {
+			format = "ERROR: " + format
+		}
+		rp.Config.Logger.Printf(format, args...)
 	}
 }

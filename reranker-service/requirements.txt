@@ -1,0 +1,4 @@
+fastapi
+uvicorn[standard]
+llama-index-core
+llama-index-postprocessor-dashscope-rerank 

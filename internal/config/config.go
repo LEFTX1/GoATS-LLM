@@ -81,6 +81,9 @@ type Config struct {
 
 	// 新增用于记录当前处理流程主要解析器版本的字段
 	ActiveParserVersion string `yaml:"active_parser_version"`
+
+	// Reranker服务配置
+	Reranker RerankerConfig `yaml:"reranker"`
 }
 
 // EmbeddingConfig Aliyun Embedding specific configuration
@@ -102,27 +105,28 @@ type TikaConfig struct {
 
 // RabbitMQConfig RabbitMQ配置结构
 type RabbitMQConfig struct {
-	URL                      string `yaml:"url"` // 例如 "amqp://guest:guest@localhost:5672/"
-	Host                     string `yaml:"host"`
-	Port                     int    `yaml:"port"`
-	Username                 string `yaml:"username"`
-	Password                 string `yaml:"password"`
-	VHost                    string `yaml:"vhost"`
-	ResumeEventsExchange     string `yaml:"resume_events_exchange"`
-	ProcessingEventsExchange string `yaml:"processing_events_exchange"`
-	UploadedRoutingKey       string `yaml:"uploaded_routing_key"`
-	ParsedRoutingKey         string `yaml:"parsed_routing_key"`
-	MatchEventsExchange      string `yaml:"match_events_exchange"`
-	MatchNeededRoutingKey    string `yaml:"match_needed_routing_key"`
-	RawResumeQueue           string `yaml:"raw_resume_queue"`
-	LLMParsingQueue          string `yaml:"llm_parsing_queue"`
-	JobMatchingQueue         string `yaml:"job_matching_queue"`
-	QdrantVectorizeQueue     string `yaml:"qdrant_vectorize_queue,omitempty"` // 新增: Qdrant向量化队列
-	VectorizeRoutingKey      string `yaml:"vectorize_routing_key,omitempty"`  // 新增: Qdrant向量化路由键
-	PrefetchCount            int    `yaml:"prefetch_count"`
-	RetryInterval            string `yaml:"retry_interval"`
-	MaxRetries               int    `yaml:"max_retries"`
-	BatchPrefetchMultiplier  int    `yaml:"batch_prefetch_multiplier"` // 批处理预取倍数，控制batchSize与prefetchCount的比例
+	URL                      string        `yaml:"url"` // 例如 "amqp://guest:guest@localhost:5672/"
+	Host                     string        `yaml:"host"`
+	Port                     int           `yaml:"port"`
+	Username                 string        `yaml:"username"`
+	Password                 string        `yaml:"password"`
+	VHost                    string        `yaml:"vhost"`
+	ResumeEventsExchange     string        `yaml:"resume_events_exchange"`
+	ProcessingEventsExchange string        `yaml:"processing_events_exchange"`
+	UploadedRoutingKey       string        `yaml:"uploaded_routing_key"`
+	ParsedRoutingKey         string        `yaml:"parsed_routing_key"`
+	MatchEventsExchange      string        `yaml:"match_events_exchange"`
+	MatchNeededRoutingKey    string        `yaml:"match_needed_routing_key"`
+	RawResumeQueue           string        `yaml:"raw_resume_queue"`
+	LLMParsingQueue          string        `yaml:"llm_parsing_queue"`
+	JobMatchingQueue         string        `yaml:"job_matching_queue"`
+	QdrantVectorizeQueue     string        `yaml:"qdrant_vectorize_queue,omitempty"` // 新增: Qdrant向量化队列
+	VectorizeRoutingKey      string        `yaml:"vectorize_routing_key,omitempty"`  // 新增: Qdrant向量化路由键
+	PrefetchCount            int           `yaml:"prefetch_count"`
+	RetryInterval            string        `yaml:"retry_interval"`
+	MaxRetries               int           `yaml:"max_retries"`
+	BatchPrefetchMultiplier  int           `yaml:"batch_prefetch_multiplier"` // 批处理预取倍数，控制batchSize与prefetchCount的比例
+	ConfirmTimeout           time.Duration `yaml:"confirm_timeout"`           // 新增: 发布确认超时时间
 	// 新增消费者工作线程和批量处理超时配置
 	ConsumerWorkers map[string]int    `yaml:"consumer_workers"` // 例如: {"upload_consumer_workers": 5, "llm_consumer_workers": 3}
 	BatchTimeouts   map[string]string `yaml:"batch_timeouts"`   // 例如: {"upload_batch_timeout": "10s"}
@@ -217,6 +221,12 @@ type QdrantConfig struct {
 	Dimension          int    `yaml:"dimension"`            // 向量维度
 	APIKey             string `yaml:"api_key,omitempty"`    // (可选) Qdrant API Key
 	DefaultSearchLimit int    `yaml:"default_search_limit"` // 新增：默认搜索结果数量
+}
+
+// RerankerConfig Reranker服务配置
+type RerankerConfig struct {
+	URL     string `yaml:"url"`
+	Enabled bool   `yaml:"enabled"`
 }
 
 // LoadConfig 从文件加载配置

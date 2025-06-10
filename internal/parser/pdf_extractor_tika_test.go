@@ -282,6 +282,65 @@ func TestConnectionError(t *testing.T) {
 	assert.Contains(t, err.Error(), "发送请求到Tika服务器失败", "错误消息应该指示连接问题")
 }
 
+// TestTikaUTF8HeaderIsSet 验证对Tika的请求是否包含正确的UTF-8编码头
+func TestTikaUTF8HeaderIsSet(t *testing.T) {
+	expectedText := "你好，世界"
+	var requestHeaders http.Header
+
+	// 1. 创建一个模拟Tika服务器，它会检查请求头
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 记录请求头以供后续验证
+		requestHeaders = r.Header
+
+		// 检查请求路径
+		if r.URL.Path != "/tika" {
+			http.NotFound(w, r)
+			return
+		}
+
+		// 检查请求方法
+		if r.Method != http.MethodPut {
+			http.Error(w, "Expected PUT request", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// 验证Accept头是否明确要求UTF-8
+		acceptHeader := r.Header.Get("Accept")
+		if !strings.Contains(acceptHeader, "charset=utf-8") {
+			http.Error(w, "Accept header missing 'charset=utf-8'", http.StatusBadRequest)
+			return
+		}
+
+		// 返回一个包含中文字符的UTF-8编码响应
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(expectedText))
+	}))
+	defer mockServer.Close()
+
+	// 2. 创建一个指向模拟服务器的Tika提取器，并禁用元数据提取，以确保只测试文本提取的请求
+	extractor := NewTikaPDFExtractor(mockServer.URL, WithMinimalMetadata(false))
+
+	// 3. 准备调用提取器的参数
+	ctx := context.Background()
+	mockPDFContent := []byte("%PDF-1.5\nMock PDF\n")
+
+	// 4. 调用文本提取方法
+	actualText, _, err := extractor.ExtractTextFromBytes(ctx, mockPDFContent, "test-utf8.pdf", nil)
+	require.NoError(t, err, "从模拟服务器提取UTF-8文本不应返回错误")
+
+	// 5. 验证结果
+	// 验证返回的文本是否正确
+	assert.Equal(t, expectedText, actualText, "提取的文本应与模拟服务器返回的UTF-8字符串完全匹配")
+
+	// 验证请求头是否被正确设置
+	require.NotNil(t, requestHeaders, "请求头不应为nil")
+	assert.Equal(t, "text/plain; charset=utf-8", requestHeaders.Get("Accept"), "Accept头应该包含charset=utf-8")
+	assert.Equal(t, "utf-8", requestHeaders.Get("Accept-Charset"), "Accept-Charset头应该是utf-8")
+
+	t.Log("测试成功：请求Tika时正确设置了UTF-8相关的Accept和Accept-Charset头")
+}
+
 // 集成测试 - 如果有真实的Tika服务器可用，则运行
 func TestWithRealTikaServer(t *testing.T) {
 	// 加载配置

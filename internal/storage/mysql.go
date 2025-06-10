@@ -5,15 +5,187 @@ import (
 	"ai-agent-go/internal/storage/models"
 	"ai-agent-go/internal/types"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/gofrs/uuid/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
+
+var mysqlTracer = otel.Tracer("ai-agent-go/storage/mysql")
+
+// GormTracingPlugin 是一个GORM插件，用于向OpenTelemetry中添加数据库操作的追踪点
+type GormTracingPlugin struct {
+	tracer         trace.Tracer
+	dbName         string
+	dbSystem       string
+	disableErrSkip bool
+}
+
+// Name 返回插件名称
+func (p *GormTracingPlugin) Name() string {
+	return "GormOpenTelemetryPlugin"
+}
+
+// Initialize 注册GORM回调以启用追踪
+func (p *GormTracingPlugin) Initialize(db *gorm.DB) error {
+	// 为各种操作类型注册回调
+	cb := db.Callback()
+
+	// 为所有CRUD操作注册Before和After回调
+	if err := cb.Create().Before("gorm:create").Register("otel:before_create", p.before("CREATE")); err != nil {
+		return err
+	}
+	if err := cb.Create().After("gorm:create").Register("otel:after_create", p.after()); err != nil {
+		return err
+	}
+
+	if err := cb.Query().Before("gorm:query").Register("otel:before_query", p.before("SELECT")); err != nil {
+		return err
+	}
+	if err := cb.Query().After("gorm:query").Register("otel:after_query", p.after()); err != nil {
+		return err
+	}
+
+	if err := cb.Update().Before("gorm:update").Register("otel:before_update", p.before("UPDATE")); err != nil {
+		return err
+	}
+	if err := cb.Update().After("gorm:update").Register("otel:after_update", p.after()); err != nil {
+		return err
+	}
+
+	if err := cb.Delete().Before("gorm:delete").Register("otel:before_delete", p.before("DELETE")); err != nil {
+		return err
+	}
+	if err := cb.Delete().After("gorm:delete").Register("otel:after_delete", p.after()); err != nil {
+		return err
+	}
+
+	if err := cb.Row().Before("gorm:row").Register("otel:before_row", p.before("ROW")); err != nil {
+		return err
+	}
+	if err := cb.Row().After("gorm:row").Register("otel:after_row", p.after()); err != nil {
+		return err
+	}
+
+	if err := cb.Raw().Before("gorm:raw").Register("otel:before_raw", p.before("RAW")); err != nil {
+		return err
+	}
+	if err := cb.Raw().After("gorm:raw").Register("otel:after_raw", p.after()); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// before 返回在GORM操作之前执行的回调函数
+func (p *GormTracingPlugin) before(operation string) func(db *gorm.DB) {
+	return func(db *gorm.DB) {
+		// 如果是错误跳过且DisableErrSkip为true，则跳过追踪
+		if p.disableErrSkip && db.Statement.SkipHooks {
+			return
+		}
+
+		// 从DB获取上下文
+		ctx := db.Statement.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		// 获取操作表名，如果为空则使用"unknown"
+		tableName := db.Statement.Table
+		if tableName == "" {
+			tableName = "unknown"
+		}
+
+		// 创建一个新的span
+		spanName := fmt.Sprintf("%s %s", operation, tableName)
+		opts := []trace.SpanStartOption{
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(
+				semconv.DBSystemMySQL,
+				attribute.String("db.name", p.dbName),
+				attribute.String("db.operation", operation),
+				attribute.String("db.sql.table", tableName),
+			),
+		}
+
+		// 获取SQL语句（如果有）
+		sqlStatement := db.Statement.SQL.String()
+		if sqlStatement != "" {
+			opts = append(opts, trace.WithAttributes(
+				attribute.String("db.statement", sqlStatement),
+			))
+		}
+
+		newCtx, span := p.tracer.Start(ctx, spanName, opts...)
+
+		// 将span保存在DB上下文中，以便在after回调中使用
+		db.Statement.Context = context.WithValue(newCtx, "otel-span", span)
+	}
+}
+
+// after 返回在GORM操作之后执行的回调函数
+func (p *GormTracingPlugin) after() func(db *gorm.DB) {
+	return func(db *gorm.DB) {
+		// 从DB上下文中获取span
+		span, ok := db.Statement.Context.Value("otel-span").(trace.Span)
+		if !ok {
+			return
+		}
+		defer span.End()
+
+		// 添加额外的属性
+		if db.Statement.RowsAffected > 0 {
+			span.SetAttributes(attribute.Int64("db.rows_affected", db.Statement.RowsAffected))
+		} else {
+			span.SetAttributes(attribute.Int64("db.rows_affected", 0))
+		}
+
+		// 记录错误（如果有），但正确处理ErrRecordNotFound
+		if db.Error != nil {
+			if db.Error == gorm.ErrRecordNotFound {
+				// ErrRecordNotFound 是业务逻辑正常情况的一部分，不应作为错误处理
+				span.SetAttributes(attribute.String("error.type", "record_not_found"))
+				span.SetStatus(codes.Ok, "record not found")
+			} else {
+				// 真正的错误情况
+				span.SetAttributes(attribute.String("error.type", "database_error"))
+				span.SetAttributes(attribute.String("error.message", db.Error.Error()))
+				span.RecordError(db.Error)
+				span.SetStatus(codes.Error, db.Error.Error())
+			}
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+	}
+}
+
+// NewGormTracingPlugin 创建一个新的GORM追踪插件
+func NewGormTracingPlugin(dbName string) *GormTracingPlugin {
+	return &GormTracingPlugin{
+		tracer:         mysqlTracer,
+		dbName:         dbName,
+		dbSystem:       "mysql",
+		disableErrSkip: true, // 默认禁用错误跳过，减少误报错误
+	}
+}
+
+// WithDisableErrSkip 设置是否禁用错误跳过
+func (p *GormTracingPlugin) WithDisableErrSkip(disable bool) *GormTracingPlugin {
+	p.disableErrSkip = disable
+	return p
+}
 
 // Database 关系数据库接口
 type Database interface {
@@ -76,6 +248,9 @@ func NewMySQL(cfg *config.MySQLConfig) (*MySQL, error) {
 		DisableForeignKeyConstraintWhenMigrating: true,                             // 禁用自动外键创建
 		Logger:                                   logger.Default.LogMode(logLevel), // 设置日志级别
 		PrepareStmt:                              true,                             // 开启预编译语句缓存
+		NowFunc: func() time.Time {
+			return time.Now().Local() // 使用本地时间作为默认时间
+		},
 	}
 
 	db, err := gorm.Open(mysql.Open(dsn), gormConfig)
@@ -100,6 +275,12 @@ func NewMySQL(cfg *config.MySQLConfig) (*MySQL, error) {
 		cfg: cfg,
 	}
 
+	// 注册OpenTelemetry追踪插件
+	tracingPlugin := NewGormTracingPlugin(cfg.Database).WithDisableErrSkip(true)
+	if err := db.Use(tracingPlugin); err != nil {
+		return nil, fmt.Errorf("注册追踪插件失败: %w", err)
+	}
+
 	// 使用 GORM 的 AutoMigrate 功能自动迁移表结构
 	if err := m.autoMigrateSchema(); err != nil {
 		sqlDB, _ := db.DB() // 尝试获取底层 *sql.DB 以关闭
@@ -115,8 +296,25 @@ func NewMySQL(cfg *config.MySQLConfig) (*MySQL, error) {
 
 // autoMigrateSchema 使用GORM自动迁移数据库表结构
 func (m *MySQL) autoMigrateSchema() error {
+	// 保存当前的日志级别
+	currentLogger := m.db.Logger
+
+	// 创建一个静默的logger以关闭SQL日志打印
+	silentLogger := logger.New(
+		log.New(log.Writer(), "", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logger.Silent, // 设置为Silent级别，关闭所有SQL日志
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  false,
+		},
+	)
+
+	// 创建一个使用静默日志记录器的DB会话
+	silentDB := m.db.Session(&gorm.Session{Logger: silentLogger})
+
 	// 列出所有需要迁移的模型
-	err := m.db.AutoMigrate(
+	err := silentDB.AutoMigrate(
 		&models.Candidate{},
 		&models.Job{},
 		&models.JobVector{},
@@ -127,6 +325,10 @@ func (m *MySQL) autoMigrateSchema() error {
 		&models.InterviewEvaluation{},
 		&models.ReviewedResume{},
 	)
+
+	// 恢复原来的日志记录器
+	m.db = m.db.Session(&gorm.Session{Logger: currentLogger})
+
 	if err != nil {
 		return fmt.Errorf("GORM自动迁移失败: %w", err)
 	}
@@ -170,17 +372,41 @@ func (m *MySQL) Delete(value interface{}, query interface{}, args ...interface{}
 
 // BatchInsertResumeSubmissions 批量插入简历提交记录
 func (m *MySQL) BatchInsertResumeSubmissions(ctx context.Context, submissions []models.ResumeSubmission) error {
+	// 创建一个命名span
+	ctx, span := mysqlTracer.Start(ctx, "MySQL.BatchInsertResumeSubmissions",
+		trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	span.SetAttributes(
+		semconv.DBSystemMySQL,
+		attribute.String("db.name", m.cfg.Database),
+		attribute.String("db.operation", "INSERT_ON_DUPLICATE"),
+		attribute.String("db.sql.table", "resume_submissions"),
+		attribute.Int("batch.size", len(submissions)),
+	)
+
 	if len(submissions) == 0 {
+		span.SetStatus(codes.Ok, "no submissions to insert")
 		return nil
 	}
 
 	// 使用 GORM 的 Clauses 方法添加 ON DUPLICATE KEY UPDATE 子句
 	// 当遇到主键冲突时，更新一个字段为其自身的值，实现幂等操作
-	return m.db.WithContext(ctx).Clauses(
+	err := m.db.WithContext(ctx).Clauses(
 		clause.OnConflict{
 			Columns:   []clause.Column{{Name: "submission_uuid"}},            // 主键列
 			DoUpdates: clause.AssignmentColumns([]string{"submission_uuid"}), // 执行无实际意义的更新
 		}).Create(&submissions).Error
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
+	span.SetAttributes(attribute.Int("db.rows_affected", len(submissions)))
+	span.SetStatus(codes.Ok, "")
+	return nil
 }
 
 // UpdateResumeProcessingStatus 更新简历处理状态
@@ -338,4 +564,112 @@ func (m *MySQL) UpdateResumeChunkPointIDs(ctx context.Context, submissionUUID st
 	}
 
 	return nil
+}
+
+// FindOrCreateCandidate 查找或创建候选人
+// 它首先尝试通过邮箱或电话号码查找候选人。如果找到，则返回该候选人。
+// 如果未找到，则创建一个新的候选人记录并返回。
+// 使用 GORM 事务以确保操作的原子性。
+func (m *MySQL) FindOrCreateCandidate(ctx context.Context, tx *gorm.DB, basicInfo map[string]string) (*models.Candidate, error) {
+	email, _ := basicInfo["email"]
+	phone, _ := basicInfo["phone"]
+
+	ctx, span := mysqlTracer.Start(ctx, "FindOrCreateCandidate", trace.WithAttributes(
+		attribute.String("candidate.email", email),
+		attribute.String("candidate.phone", phone),
+	))
+	defer span.End()
+
+	// 确保至少有一个有效标识符
+	if email == "" && phone == "" {
+		err := fmt.Errorf("邮箱和电话至少需要一个")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
+	var candidate models.Candidate
+	db := m.db
+	if tx != nil {
+		db = tx // 如果在事务中，使用事务的 db handle
+	}
+
+	// 1. 尝试通过邮箱或电话查找候选人
+	var conditions []string
+	var args []interface{}
+	if email != "" {
+		conditions = append(conditions, "primary_email = ?")
+		args = append(args, email)
+	}
+	if phone != "" {
+		conditions = append(conditions, "primary_phone = ?")
+		args = append(args, phone)
+	}
+
+	// 使用 GORM 的 Or 构建查询
+	var firstCondition string
+	if len(conditions) > 0 {
+		firstCondition = conditions[0]
+		conditions = conditions[1:]
+	} else {
+		// 如果 email 和 phone 都为空，则直接返回错误，避免下面的 orQuery panic
+		err := fmt.Errorf("邮箱和电话都为空")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
+	orQuery := db.WithContext(ctx).Model(&models.Candidate{}).Where(firstCondition, args[0])
+	for i, cond := range conditions {
+		orQuery = orQuery.Or(cond, args[i+1])
+	}
+
+	err := orQuery.First(&candidate).Error
+
+	if err == nil {
+		// 找到了候选人，可以考虑在这里用 basicInfo 更新现有记录
+		span.SetAttributes(attribute.Bool("candidate.found", true), attribute.String("candidate.id", candidate.CandidateID))
+		return &candidate, nil
+	}
+
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		// 发生了除"未找到记录"之外的其它数据库错误
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to query candidate")
+		return nil, fmt.Errorf("查询候选人失败: %w", err)
+	}
+
+	// 2. 如果未找到，创建新的候选人
+	span.SetAttributes(attribute.Bool("candidate.found", false))
+
+	newUUID, err := uuid.NewV7()
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to generate UUIDv7")
+		return nil, fmt.Errorf("生成UUIDv7失败: %w", err)
+	}
+
+	gender, ok := basicInfo["gender"]
+	if !ok || gender == "" {
+		gender = "未知" // 设置默认值
+	}
+
+	newCandidate := &models.Candidate{
+		CandidateID:     newUUID.String(),
+		PrimaryName:     basicInfo["name"],
+		PrimaryEmail:    email,
+		PrimaryPhone:    phone,
+		Gender:          gender,
+		CurrentLocation: basicInfo["current_location"],
+		// 其他字段可以在后续步骤中更新，比如 profile_summary
+	}
+
+	if err := db.WithContext(ctx).Create(newCandidate).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to create candidate")
+		return nil, fmt.Errorf("创建新候选人失败: %w", err)
+	}
+
+	span.SetAttributes(attribute.String("candidate.id", newCandidate.CandidateID))
+	return newCandidate, nil
 }

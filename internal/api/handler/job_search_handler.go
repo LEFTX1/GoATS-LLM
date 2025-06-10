@@ -2,6 +2,7 @@ package handler
 
 import (
 	"ai-agent-go/internal/config"
+	"ai-agent-go/internal/constants"
 	"ai-agent-go/internal/processor"
 	"ai-agent-go/internal/storage"
 	"ai-agent-go/internal/storage/models"
@@ -11,6 +12,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -61,7 +64,7 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 	h.logger.Printf("成功获取 JobID: %s 的 JD 文本，长度: %d", jobID, len(jdText))
 
 	// 2. 获取 JD 向量
-	jdVector, err := h.jdProcessor.GetJobDescriptionVector(ctx, jdText)
+	jdVector, err := h.jdProcessor.GetJobDescriptionVector(ctx, jobID, jdText)
 	if err != nil {
 		h.logger.Printf("为 JobID: %s 生成 JD 向量失败: %v", jobID, err)
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "生成 JD 向量失败"})
@@ -117,7 +120,7 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 	// 提取 submission_uuid 列表并去重
 	submissionUUIDsMap := make(map[string]bool)
 	for _, sr := range searchResults {
-		if payloadResumeID, ok := sr.Payload["resume_id"].(string); ok && payloadResumeID != "" {
+		if payloadResumeID, ok := sr.Payload["submission_uuid"].(string); ok && payloadResumeID != "" {
 			submissionUUIDsMap[payloadResumeID] = true
 		}
 	}
@@ -125,8 +128,13 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 	for uuid := range submissionUUIDsMap {
 		uniqueSubmissionUUIDs = append(uniqueSubmissionUUIDs, uuid)
 	}
+	sort.Strings(uniqueSubmissionUUIDs) // 对UUID进行排序，确保输出稳定
 
-	h.logger.Printf("提取到 %d 个唯一的 Submission UUIDs: %v", len(uniqueSubmissionUUIDs), uniqueSubmissionUUIDs)
+	if len(uniqueSubmissionUUIDs) > 5 {
+		h.logger.Printf("提取到 %d 个唯一的 Submission UUIDs，例如: %v...", len(uniqueSubmissionUUIDs), uniqueSubmissionUUIDs[:5])
+	} else {
+		h.logger.Printf("提取到 %d 个唯一的 Submission UUIDs: %v", len(uniqueSubmissionUUIDs), uniqueSubmissionUUIDs)
+	}
 
 	// 5. 从数据库获取简历详细信息
 	var detailedResumes []map[string]interface{}
@@ -151,7 +159,7 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 			var qdrantPayloadForSubmission map[string]interface{}
 
 			for _, sr := range searchResults {
-				if pid, ok := sr.Payload["resume_id"].(string); ok && pid == sub.SubmissionUUID {
+				if pid, ok := sr.Payload["submission_uuid"].(string); ok && pid == sub.SubmissionUUID {
 					if sr.Score > bestScoreForSubmission {
 						bestScoreForSubmission = sr.Score
 						qdrantPayloadForSubmission = sr.Payload
@@ -169,13 +177,14 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 			}
 
 			detailedResumes = append(detailedResumes, map[string]interface{}{
-				"submission_uuid":        sub.SubmissionUUID,
-				"file_name":              sub.OriginalFilename,
-				"source_channel":         sub.SourceChannel,
-				"upload_time":            sub.SubmissionTimestamp.Format("2006-01-02 15:04:05"),
-				"candidate_name":         candidateName,
-				"candidate_email":        candidateEmail,
-				"candidate_phone":        candidatePhone,
+				"submission_uuid": sub.SubmissionUUID,
+				"file_name":       sub.OriginalFilename,
+				"source_channel":  sub.SourceChannel,
+				"upload_time":     sub.SubmissionTimestamp.Format("2006-01-02 15:04:05"),
+				"candidate_name":  candidateName,
+				"candidate_email": candidateEmail,
+				"candidate_phone": candidatePhone,
+				// TODO: 此处直接返回了完整的LLM解析JSON，未来可根据前端需求裁剪，只返回摘要信息以减少网络负载
 				"parsed_basic_info":      sub.LLMParsedBasicInfo, // 已经是datatypes.JSON
 				"processing_status":      sub.ProcessingStatus,
 				"qdrant_score":           bestScoreForSubmission,
@@ -193,25 +202,45 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 }
 
 // getJobDescription 辅助函数，用于获取岗位描述文本。
-// 首先尝试从 Redis 缓存获取，如果缓存未命中，则从 MySQL 数据库查询。
+// 首先尝试从 Redis 缓存获取，如果缓存未命中，则从 MySQL 数据库查询，并回填缓存。
 func (h *JobSearchHandler) getJobDescription(ctx context.Context, jobID string) (string, error) {
-	// 1. 尝试从 Redis 获取 JD 文本 (这里假设JD文本直接存在keywords那个key里, 或者有专门的JD文本缓存)
-	// 根据现有 redis.go, 还没有直接缓存 JD 完整文本的函数，先假设 JobKeywordsCachePrefix 也可能存JD原文或结构化信息
-	// 实际中，应该为JD原文设计专门的缓存key和逻辑
+	cacheKey := fmt.Sprintf("%s%s", constants.JobDescriptionTextCachePrefix, jobID)
 
-	// 我们先从 MySQL 直接获取
-	var job models.Job
-	err := h.storage.MySQL.DB().WithContext(ctx).Where("job_id = ?", jobID).First(&job).Error
+	// 1. 尝试从 Redis 缓存获取 JD 文本
+	cachedJD, err := h.storage.Redis.Get(ctx, cacheKey)
+	if err == nil && cachedJD != "" {
+		h.logger.Printf("从 Redis 缓存命中 JD 文本 for JobID: %s", jobID)
+		return cachedJD, nil
+	}
 	if err != nil {
-		return "", err //包括 gorm.ErrRecordNotFound
+		// 如果是 redis.Nil 之外的错误，记录一下，但继续从数据库获取
+		if !errors.Is(err, storage.ErrNotFound) {
+			h.logger.Printf("从 Redis 获取 JD 文本缓存失败 for JobID: %s: %v", jobID, err)
+		}
+	}
+
+	// 2. 缓存未命中，从 MySQL 直接获取
+	h.logger.Printf("Redis 缓存未命中 JD 文本 for JobID: %s，从 MySQL 查询", jobID)
+	var job models.Job
+	err = h.storage.MySQL.DB().WithContext(ctx).Where("job_id = ?", jobID).First(&job).Error
+	if err != nil {
+		return "", err // 包括 gorm.ErrRecordNotFound
 	}
 
 	if job.JobDescriptionText == "" {
 		return "", fmt.Errorf("job_id %s 对应的岗位描述为空", jobID)
 	}
 
-	// TODO: 获取到 JD 后，可以考虑将其存入 Redis 缓存
-	// 例如: h.storage.Redis.Set(ctx, fmt.Sprintf("jd_text_cache:%s", jobID), job.JobDescriptionText, 1*time.Hour)
+	// 3. 获取到 JD 后，将其存入 Redis 缓存
+	// 使用一个合理的过期时间，例如 24 小时
+	cacheDuration := 24 * time.Hour
+	err = h.storage.Redis.Set(ctx, cacheKey, job.JobDescriptionText, cacheDuration)
+	if err != nil {
+		// 缓存失败不应阻塞主流程，但需要记录日志
+		h.logger.Printf("将 JD 文本存入 Redis 失败 for JobID: %s: %v", jobID, err)
+	} else {
+		h.logger.Printf("成功将 JD 文本存入 Redis 缓存 for JobID: %s", jobID)
+	}
 
 	return job.JobDescriptionText, nil
 }

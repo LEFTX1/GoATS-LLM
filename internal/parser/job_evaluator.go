@@ -423,38 +423,6 @@ func validateEvaluationResult(result *LLMJobMatchEvaluation) error {
 		return fmt.Errorf("match_score must be between 0 and 100, got %d", result.MatchScore)
 	}
 
-	// 验证亮点数量 - 调整检查顺序和逻辑
-	// 先检查特别高分但亮点太少的情况
-	if result.MatchScore >= 85 && len(result.MatchHighlights) <= 2 {
-		return fmt.Errorf("unusually few match_highlights (%d) for very high score (%d)",
-			len(result.MatchHighlights), result.MatchScore)
-	} else if result.MatchScore >= 70 && len(result.MatchHighlights) < 3 {
-		// 再检查高分但亮点不足3个的情况
-		return fmt.Errorf("match_highlights must have at least 3 items for high scores (score: %d, highlights: %d)",
-			result.MatchScore, len(result.MatchHighlights))
-	} else if result.MatchScore >= 50 && len(result.MatchHighlights) < 1 {
-		// 再检查中分但亮点为空的情况
-		return fmt.Errorf("match_highlights must have at least 1 item when score is %d or above", result.MatchScore)
-	}
-	// 对于50分以下的低分，允许亮点为空
-
-	// 检查低分但没有不足的异常情况
-	if result.MatchScore < 60 && len(result.PotentialGaps) == 0 {
-		return fmt.Errorf("potential_gaps should not be empty for low scores (<60)")
-	}
-
-	// 验证亮点不超过5个
-	if len(result.MatchHighlights) > 5 {
-		return fmt.Errorf("match_highlights should not contain more than 5 items, got %d",
-			len(result.MatchHighlights))
-	}
-
-	// 验证不足不超过3个
-	if len(result.PotentialGaps) > 3 {
-		return fmt.Errorf("potential_gaps should not contain more than 3 items, got %d",
-			len(result.PotentialGaps))
-	}
-
 	// 验证摘要长度
 	if result.ResumeSummaryForJD == "" {
 		return fmt.Errorf("resume_summary_for_jd must not be empty")

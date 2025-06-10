@@ -82,6 +82,7 @@ type ResumeChunk struct {
 	ImportanceScore   float32       `json:"importance_score"`
 	UniqueIdentifiers Identity      `json:"unique_identifiers"`
 	Metadata          ChunkMetadata `json:"metadata"`
+	ChunkTitle        string        `json:"chunk_title,omitempty"` // 可选标题，适用于有标题的分块
 }
 
 // Identity 表示简历中的唯一标识信息

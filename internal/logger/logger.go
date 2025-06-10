@@ -4,16 +4,21 @@ import (
 	"context" // 导入上下文包，用于在日志中传递请求范围的数据
 	"io"      // 导入I/O接口包
 	"os"      // 导入操作系统功能包，如此处的标准输出
-	"time"    // 导入时间包，用于格式化时间戳
+	"path/filepath"
+	"time" // 导入时间包，用于格式化时间戳
 
 	"github.com/rs/zerolog"     // 导入高性能的zerolog日志库
 	"github.com/rs/zerolog/log" // 导入zerolog的全局日志实例
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
 	// Logger 默认的全局日志实例，应用中其他地方可以直接使用
 	Logger = log.Logger
 )
+
+// 定义context key
+type loggerContextKey struct{}
 
 // Config 日志配置结构体，用于定义日志系统的行为
 type Config struct {
@@ -33,13 +38,28 @@ func Init(config Config) {
 	zerolog.SetGlobalLevel(level) // 设置全局日志级别
 
 	// 设置日志输出格式
-	var output io.Writer = os.Stdout // 默认输出到标准输出
-	if config.Format == "pretty" {   // 如果格式是"pretty"
+	var output io.Writer
+	logFilePath := "logs/app.log" // Default path
+
+	if config.Format == "pretty" { // 如果格式是"pretty"
 		output = zerolog.ConsoleWriter{ // 使用zerolog的控制台写入器
 			Out:        os.Stdout,         // 输出目标为标准输出
 			TimeFormat: config.TimeFormat, // 使用配置的时间格式
 			NoColor:    false,             // 在控制台输出中启用颜色
 		}
+	} else {
+		// 默认或指定为json等其他格式时，输出到文件
+		// 在写入文件之前，确保目录存在
+		logDir := filepath.Dir(logFilePath)
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			log.Fatal().Err(err).Str("path", logDir).Msg("创建日志目录失败")
+		}
+
+		file, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+		if err != nil {
+			log.Fatal().Err(err).Str("path", logFilePath).Msg("无法打开日志文件")
+		}
+		output = file
 	}
 
 	// 设置默认时间格式
@@ -100,17 +120,109 @@ func WithContext(ctx context.Context) context.Context {
 	return Logger.WithContext(ctx) // 返回一个包含了该logger的新context
 }
 
-// WithSubmissionUUID 创建一个包含submission_uuid的日志上下文
-func WithSubmissionUUID(ctx context.Context, submissionUUID string) context.Context {
-	logger := zerolog.Ctx(ctx).With().Str("submission_uuid", submissionUUID).Logger()
-	return logger.WithContext(ctx)
+// WithOTelTrace 从trace上下文提取trace_id和span_id添加到日志
+func WithOTelTrace(ctx context.Context) (context.Context, *zerolog.Logger) {
+	// 先从上下文中获取可能已有的日志器及其字段
+	var baseLogger *zerolog.Logger
+	if ctx != nil {
+		// 首先尝试从我们的自定义key中获取
+		if l, ok := ctx.Value(loggerContextKey{}).(*zerolog.Logger); ok {
+			baseLogger = l
+		} else {
+			// 如果没有，尝试从zerolog的内置上下文中获取
+			l := zerolog.Ctx(ctx)
+			if l != zerolog.DefaultContextLogger {
+				baseLogger = l
+			}
+		}
+	}
+
+	// 如果上下文中没有logger，则使用全局logger作为基础
+	if baseLogger == nil {
+		baseLogger = &Logger
+	}
+
+	// 从trace上下文获取span信息
+	spanCtx := trace.SpanContextFromContext(ctx)
+
+	// 创建新的logger，保留原有字段的同时添加trace信息
+	var enrichedLogger zerolog.Logger
+	if spanCtx.IsValid() {
+		// 有效trace上下文，添加trace信息
+		enrichedLogger = baseLogger.With().
+			Str("trace_id", spanCtx.TraceID().String()).
+			Str("span_id", spanCtx.SpanID().String()).
+			Logger()
+	} else {
+		// 无效trace上下文，保持原有logger
+		enrichedLogger = *baseLogger
+	}
+
+	// 同时更新我们的自定义key和zerolog的内置上下文
+	newCtx := context.WithValue(ctx, loggerContextKey{}, &enrichedLogger)
+	newCtx = enrichedLogger.WithContext(newCtx)
+
+	return newCtx, &enrichedLogger
 }
 
-// FromContext 从上下文获取日志记录器，如果不存在则返回全局日志记录器
-func FromContext(ctx context.Context) *zerolog.Logger {
-	logger := zerolog.Ctx(ctx)
-	if logger.GetLevel() == zerolog.Disabled {
-		return &Logger
+// WithSubmissionUUID 增强版，同时添加submission_uuid和trace信息
+func WithSubmissionUUID(ctx context.Context, submissionUUID string) context.Context {
+	// 先检查ctx中是否已缓存了logger
+	var baseLogger *zerolog.Logger
+	if ctx != nil {
+		if l, ok := ctx.Value(loggerContextKey{}).(*zerolog.Logger); ok {
+			baseLogger = l
+		}
 	}
-	return logger
+
+	// 没有缓存的logger，尝试创建一个带trace信息的logger
+	if baseLogger == nil {
+		spanCtx := trace.SpanContextFromContext(ctx)
+		if spanCtx.IsValid() {
+			logger := Logger.With().
+				Str("trace_id", spanCtx.TraceID().String()).
+				Str("span_id", spanCtx.SpanID().String()).
+				Logger()
+			baseLogger = &logger
+		} else {
+			baseLogger = &Logger
+		}
+	}
+
+	// 在已有logger基础上添加submission_uuid
+	enrichedLogger := baseLogger.With().Str("submission_uuid", submissionUUID).Logger()
+
+	// 保存到context
+	return context.WithValue(ctx, loggerContextKey{}, &enrichedLogger)
+}
+
+// FromContext 增强版，优先从context获取带trace的logger
+func FromContext(ctx context.Context) *zerolog.Logger {
+	// 先尝试从上下文中获取缓存的logger
+	if ctx != nil {
+		if l, ok := ctx.Value(loggerContextKey{}).(*zerolog.Logger); ok {
+			return l
+		}
+	}
+
+	// 无缓存logger，检查是否有trace信息并创建新logger
+	var logger zerolog.Logger
+	if ctx != nil {
+		spanCtx := trace.SpanContextFromContext(ctx)
+		if spanCtx.IsValid() {
+			logger = Logger.With().
+				Str("trace_id", spanCtx.TraceID().String()).
+				Str("span_id", spanCtx.SpanID().String()).
+				Logger()
+
+			// 缓存新创建的logger到context，以便后续调用复用
+			if ctx != nil {
+				ctx = context.WithValue(ctx, loggerContextKey{}, &logger)
+			}
+			return &logger
+		}
+	}
+
+	// 无trace信息，返回默认logger
+	return &Logger
 }

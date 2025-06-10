@@ -213,8 +213,6 @@ JSON输出格式规范：
 	}
 }
 
-// parser/chunker_llm.go
-
 func (c *LLMResumeChunker) generateFewShotExamples() {
 	c.fewShotExamples = `以下是一些示例分析，请参考这些模式进行学习：
 
@@ -244,7 +242,7 @@ Python, Django.
     "education_level": "本科", "job_intention": "软件工程师", "years_of_experience": 0 
   },
   "chunks": [
-    { "chunk_id": 1, "resume_identifier": "王小明_13800001111", "type": "BASIC_INFO", "title": "", 
+    { "chunk_id": 1, "resume_identifier": "王小明_13800001111", "type": "BASIC_INFO", "title": "基本信息", 
       "content": "王小明\n13800001111 wang.xiaoming@example.com\n上海市 软件工程师" },
     { "chunk_id": 2, "resume_identifier": "王小明_13800001111", "type": "EDUCATION", "title": "教育背景", 
       "content": "某大学 计算机科学 本科 2018-2022" },
@@ -284,7 +282,7 @@ AI创新公司 算法实习生 2025.01 - 2025.03
     "education_level": "硕士", "job_intention": "算法工程师", "location": "北京", "github": "", "position": "", "years_of_experience": 0.25 
   },
   "chunks": [
-    { "chunk_id": 1, "resume_identifier": "李小莉_13900002222", "type": "BASIC_INFO", "title": "", 
+    { "chunk_id": 1, "resume_identifier": "李小莉_13900002222", "type": "BASIC_INFO", "title": "基本信息", 
       "content": "李小莉\n13900002222 li.xiaoli@example.com\n北京 应届硕士 意向：算法工程师" },
     { "chunk_id": 2, "resume_identifier": "李小莉_13900002222", "type": "PERSONAL_INTRO", "title": "个人简介",
       "content": "对机器学习充满热情，乐于钻研算法原理。" },
@@ -327,7 +325,7 @@ AI创新公司 算法实习生 2025.01 - 2025.03
     "education_level": "", "job_intention": "高级软件经理", "location": "深圳", "github": "", "years_of_experience": 8 
   },
   "chunks": [
-    { "chunk_id": 1, "resume_identifier": "张大强_13700003333", "type": "BASIC_INFO", "title": "", 
+    { "chunk_id": 1, "resume_identifier": "张大强_13700003333", "type": "BASIC_INFO", "title": "基本信息", 
       "content": "张大强\n13700003333 zhang.daqiang@example.com\n深圳 高级软件经理 8年经验" },
     { "chunk_id": 2, "resume_identifier": "张大强_13700003333", "type": "WORK_EXPERIENCE", "title": "工作经验", 
       "content": "牛X科技 高级经理 2019-至今\n - 带领团队负责核心产品线。\n老牌公司 软件工程师 2016-2019\n - 开发与维护XX系统。" },

@@ -210,7 +210,7 @@ func TestResumeProcessor(t *testing.T) {
 		cfg.Tika.ServerURL = "http://localhost:9998"
 		cfg.Tika.Type = "tika"
 
-		processor, err := CreateDefaultProcessor(ctx, cfg, storageManager)
+		processor, err := CreateProcessorFromConfig(ctx, cfg, storageManager)
 		require.NoError(t, err)
 
 		// 验证默认组件

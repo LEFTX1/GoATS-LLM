@@ -153,7 +153,8 @@ func (e *TikaPDFExtractor) ExtractTextFromBytes(ctx context.Context, data []byte
 
 	// 设置头信息
 	req.Header.Set("Content-Type", "application/pdf")
-	req.Header.Set("Accept", "text/plain")
+	req.Header.Set("Accept", "text/plain; charset=utf-8") // 明确要求UTF-8编码
+	req.Header.Set("Accept-Charset", "utf-8")             // 额外添加，增强兼容性
 
 	// 如果有URI，添加到请求头
 	if uri != "" {
