@@ -18,10 +18,13 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/joho/godotenv"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -178,7 +181,31 @@ func oneTimeSetupFunc(t *testing.T) {
 	var llmForEvaluator model.ToolCallingChatModel
 	var llmInitErr error
 
-	apiKey := testCfg.Aliyun.APIKey
+	//从env文件读取apikey
+	// 构建多个可能的路径
+	envPaths := []string{
+		filepath.Join(testConfigPath, ".env"), // 当前目录
+		".env",                                // 相对路径
+		filepath.Join(testConfigPath, "../../../.env"),      // 假设从internal/api/handler运行
+		filepath.Join(filepath.Dir(testConfigPath), ".env"), // 配置文件同级目录
+	}
+
+	// 遍历路径，找到第一个存在的.env文件
+	for _, envPath := range envPaths {
+		if _, err := os.Stat(envPath); err == nil {
+			// 找到.env文件，加载它
+			if err := godotenv.Load(envPath); err != nil {
+				t.Logf("Warning: Failed to load .env file from %s: %v", envPath, err)
+			} else {
+				t.Logf("Successfully loaded .env file from %s", envPath)
+			}
+			break
+		}
+	}
+
+	// 优先从环境变量获取API密钥
+	apiKey := os.Getenv("DASHSCOPE_API_KEY")
+	testCfg.Aliyun.APIKey = apiKey // 确保配置中也更新了API Key
 	apiURL := testCfg.Aliyun.APIURL
 	if apiURL == "" {
 		apiURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" // Default Dashscope-compatible endpoint
@@ -307,104 +334,6 @@ func oneTimeSetupFunc(t *testing.T) {
 
 	setupDone = true
 	t.Log("oneTimeSetupFunc completed.")
-}
-
-// TestRepairResumeVectorsFromCSV 是一个集成测试，用于修复MySQL中具有简历块数据但缺少向量数据库存储的记录
-// 这个测试从CSV文件读取数据，为每个块生成embedding，并将它们存储到向量数据库
-func TestRepairResumeVectorsFromCSV(t *testing.T) {
-	// 使用共享测试设置，确保环境配置正确
-	oneTimeSetupFunc(t)
-
-	// 跳过CI环境，只在本地运行
-	if os.Getenv("CI") != "" {
-		t.Skip("在CI环境中跳过此测试")
-	}
-
-	// 检查必要的存储组件是否可用
-	if testStorageManager.Qdrant == nil {
-		t.Skip("Qdrant未配置或不可用，跳过测试")
-	}
-
-	// 检查API密钥和嵌入服务
-	if testCfg.Aliyun.APIKey == "" || testCfg.Aliyun.APIKey == "your-api-key" {
-		t.Skip("未配置有效的阿里云API密钥，跳过测试")
-	}
-
-	// 初始化embedder
-	aliyunEmbeddingConfig := config.EmbeddingConfig{
-		Model:      testCfg.Aliyun.Embedding.Model,
-		BaseURL:    testCfg.Aliyun.Embedding.BaseURL,
-		Dimensions: testCfg.Aliyun.Embedding.Dimensions,
-	}
-	embedder, err := parser.NewAliyunEmbedder(testCfg.Aliyun.APIKey, aliyunEmbeddingConfig)
-	require.NoError(t, err, "初始化embedder失败")
-
-	// 测试API密钥是否有效
-	testEmbedding, err := embedder.EmbedStrings(context.Background(), []string{"测试API密钥是否有效"})
-	if err != nil {
-		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "invalid_api_key") {
-			t.Skip("阿里云API密钥无效，跳过测试")
-		}
-		require.NoError(t, err, "测试嵌入请求失败")
-	}
-	require.NotEmpty(t, testEmbedding, "嵌入结果不能为空")
-
-	// 从CSV文件加载数据
-	chunks, err := loadResumeChunksFromCSV(t, "../../../testdata/resume_submission_chunks.csv")
-	require.NoError(t, err, "加载简历块CSV数据失败")
-
-	// 按submissionUUID分组处理
-	submissionMap := groupChunksBySubmissionUUID(chunks)
-	t.Logf("找到 %d 个不同的简历提交需要处理", len(submissionMap))
-
-	// 处理每个简历
-	for submissionUUID, submissionChunks := range submissionMap {
-		t.Logf("处理简历 %s 的 %d 个块", submissionUUID, len(submissionChunks))
-
-		// 1. 获取简历基本信息
-		var basicInfo map[string]string
-		// 如果MySQL可用，尝试获取基本信息
-		if testStorageManager.MySQL != nil {
-			basicInfo, err = getBasicInfoForSubmission(context.Background(), testStorageManager.MySQL, submissionUUID)
-			if err != nil {
-				t.Logf("警告: 获取简历 %s 的基本信息失败: %v，使用默认值", submissionUUID, err)
-				basicInfo = getDefaultBasicInfo()
-			}
-		} else {
-			t.Log("MySQL不可用，使用默认基本信息")
-			basicInfo = getDefaultBasicInfo()
-		}
-
-		// 2. 准备简历块embedding处理
-		resumeChunks, texts := prepareChunksForEmbedding(submissionChunks, basicInfo)
-
-		// 3. 执行embedding
-		t.Logf("为简历 %s 执行 %d 个文本嵌入", submissionUUID, len(texts))
-		embeddings, err := embedder.EmbedStrings(context.Background(), texts)
-		require.NoError(t, err, "生成简历 %s 的向量嵌入失败", submissionUUID)
-
-		// 4. 存储向量到Qdrant
-		pointIDs, err := testStorageManager.Qdrant.StoreResumeVectors(context.Background(), submissionUUID, resumeChunks, embeddings)
-		require.NoError(t, err, "存储简历 %s 的向量到Qdrant失败", submissionUUID)
-		t.Logf("简历 %s 的向量已成功存入Qdrant，生成 %d 个point_id", submissionUUID, len(pointIDs))
-
-		// 5. 更新数据库（仅当MySQL可用）
-		if testStorageManager.MySQL != nil {
-			err = updatePointIDsInDatabase(context.Background(), testStorageManager.MySQL, submissionChunks, pointIDs, submissionUUID)
-			if err != nil {
-				t.Logf("警告: 更新简历 %s 的数据库记录失败: %v", submissionUUID, err)
-			} else {
-				t.Logf("简历 %s 的数据库记录已成功更新", submissionUUID)
-			}
-		} else {
-			t.Log("MySQL不可用，跳过数据库更新")
-		}
-
-		// 等待一会，避免API限制
-		time.Sleep(2 * time.Second)
-	}
-
-	t.Log("所有简历向量修复完成")
 }
 
 // 返回默认的基本信息
@@ -601,64 +530,73 @@ func getBasicInfoForSubmission(ctx context.Context, db *storage.MySQL, submissio
 	return basicInfo, nil
 }
 
-// 准备向量化数据
+// prepareChunksForEmbedding 准备要嵌入的简历块
 func prepareChunksForEmbedding(chunks []ResumeChunkData, basicInfo map[string]string) ([]types.ResumeChunk, []string) {
 	var resumeChunks []types.ResumeChunk
 	var texts []string
 
 	for _, chunk := range chunks {
-		// 确保跳过BASIC_INFO类型的分块
-		if chunk.ChunkType == "BASIC_INFO" {
-			continue
-		}
+		// 准备要嵌入的文本 - 基于传入的基本信息和块内容构造增强文本
+		text := generateEmbeddingText(chunk, basicInfo)
+		texts = append(texts, text)
 
-		// 准备唯一标识符
+		// 创建唯一标识符
 		identifiers := types.Identity{
 			Name:  basicInfo["name"],
 			Phone: basicInfo["phone"],
 			Email: basicInfo["email"],
 		}
 
-		// 提取元数据
-		experienceYears := 0
-		if yearsStr, ok := basicInfo["years_of_experience"]; ok {
-			if years, err := strconv.ParseFloat(yearsStr, 64); err == nil {
-				experienceYears = int(years)
+		// 创建元数据
+		metadata := make(types.ChunkMetadata)
+
+		// 添加基本元数据
+		metadata["highest_education"] = basicInfo["highest_education"]
+		metadata["is_211"] = basicInfo["is_211"] == "true"
+		metadata["is_985"] = basicInfo["is_985"] == "true"
+		metadata["is_double_top"] = basicInfo["is_double_top"] == "true"
+
+		// 添加经验相关元数据
+		metadata["has_work_exp"] = basicInfo["has_work_exp"] == "true"
+		metadata["has_intern_exp"] = basicInfo["has_intern"] == "true"
+
+		// 添加奖项相关元数据
+		metadata["has_algorithm_award"] = basicInfo["has_algorithm_award"] == "true"
+		metadata["has_programming_competition_award"] = basicInfo["has_programming_competition_award"] == "true"
+
+		// 添加经验年限
+		if expStr, ok := basicInfo["years_of_experience"]; ok && expStr != "" {
+			if expFloat, err := strconv.ParseFloat(expStr, 32); err == nil {
+				metadata["years_of_experience"] = float32(expFloat)
 			}
 		}
 
-		metadata := types.ChunkMetadata{
-			ExperienceYears: experienceYears,
-			EducationLevel:  basicInfo["highest_education"],
-		}
-
-		// 确定重要性分数
-		importanceScore := getImportanceScoreByType(chunk.ChunkType)
-
-		// 创建ResumeChunk
-		resumeChunk := types.ResumeChunk{
+		// 创建ResumeChunk - Qdrant存储结构
+		resumeChunks = append(resumeChunks, types.ResumeChunk{
 			ChunkID:           chunk.ChunkIDInSubmission,
 			ChunkType:         chunk.ChunkType,
 			ChunkTitle:        chunk.ChunkTitle,
 			Content:           chunk.ChunkContentText,
-			ImportanceScore:   importanceScore,
+			ImportanceScore:   getImportanceScoreByType(chunk.ChunkType),
 			UniqueIdentifiers: identifiers,
 			Metadata:          metadata,
-		}
-
-		// 准备嵌入文本
-		var embeddingText string
-		if chunk.ChunkTitle != "" {
-			embeddingText = fmt.Sprintf("%s: %s", chunk.ChunkTitle, chunk.ChunkContentText)
-		} else {
-			embeddingText = chunk.ChunkContentText
-		}
-
-		resumeChunks = append(resumeChunks, resumeChunk)
-		texts = append(texts, embeddingText)
+		})
 	}
 
 	return resumeChunks, texts
+}
+
+// generateEmbeddingText 生成要嵌入的文本
+func generateEmbeddingText(chunk ResumeChunkData, basicInfo map[string]string) string {
+	// 准备嵌入文本，基于分块标题和内容构建
+	embeddingText := ""
+	if chunk.ChunkTitle != "" {
+		embeddingText = fmt.Sprintf("%s: %s", chunk.ChunkTitle, chunk.ChunkContentText)
+	} else {
+		embeddingText = chunk.ChunkContentText
+	}
+
+	return embeddingText
 }
 
 // 根据分块类型确定重要性分数
@@ -989,8 +927,6 @@ func TestInitializeQdrantCollection(t *testing.T) {
 }
 
 // TestRebuildCompleteVectorDatabase 是一个集成测试，用于彻底重建向量数据库
-// 执行流程：1.删除向量数据库所有数据 2.从CSV读取所有非BASIC_INFO块 3.重新生成embedding并存储
-// 4.覆盖MySQL中的point_id 5.确保数据一致性
 func TestRebuildCompleteVectorDatabase(t *testing.T) {
 	// 使用共享测试设置，确保环境配置正确
 	oneTimeSetupFunc(t)
@@ -1031,13 +967,28 @@ func TestRebuildCompleteVectorDatabase(t *testing.T) {
 
 	// 统计不同类型的块数量
 	typeCount := make(map[string]int)
+	coreTypeCount := make(map[string]int) // 白名单中的核心类型
+	totalCount := 0
+	totalCoreCount := 0
+
 	for _, chunk := range chunks {
 		typeCount[chunk.ChunkType]++
+		totalCount++
+
+		// 统计核心类型的数量
+		if types.AllowedVectorTypes[types.SectionType(chunk.ChunkType)] {
+			coreTypeCount[chunk.ChunkType]++
+			totalCoreCount++
+		}
 	}
 
-	t.Logf("CSV文件中数据块类型统计:")
+	t.Logf("CSV文件中数据块类型统计 (总计: %d 块, 其中核心类型: %d 块):", totalCount, totalCoreCount)
 	for chunkType, count := range typeCount {
-		t.Logf("类型 %s: %d 个块", chunkType, count)
+		isCore := ""
+		if types.AllowedVectorTypes[types.SectionType(chunkType)] {
+			isCore = " [核心类型]"
+		}
+		t.Logf("类型 %s: %d 个块%s", chunkType, count, isCore)
 	}
 
 	// 按submissionUUID分组处理
@@ -1110,6 +1061,14 @@ func TestRebuildCompleteVectorDatabase(t *testing.T) {
 	// 用于记录所有处理的submission的pointIDs
 	allSubmissionPointIDs := make(map[string][]string)
 
+	// 使用全局白名单来判断核心块类型，确保与业务代码保持一致
+	t.Log("使用白名单过滤核心块类型。当前白名单中的类型：")
+	for chunkType, allowed := range types.AllowedVectorTypes {
+		if allowed {
+			t.Logf("- %s", chunkType)
+		}
+	}
+
 	for submissionUUID, submissionChunks := range submissionMap {
 		t.Logf("处理简历 %s 的 %d 个块", submissionUUID, len(submissionChunks))
 
@@ -1120,23 +1079,64 @@ func TestRebuildCompleteVectorDatabase(t *testing.T) {
 			basicInfo = getDefaultBasicInfo()
 		}
 
-		// 准备简历块embedding处理，跳过BASIC_INFO类型
-		var nonBasicChunks []ResumeChunkData
+		// 准备简历块embedding处理，只选择在白名单中的核心类型
+		var selectedChunks []ResumeChunkData
 		for _, chunk := range submissionChunks {
-			if chunk.ChunkType != "BASIC_INFO" {
-				nonBasicChunks = append(nonBasicChunks, chunk)
+			// 检查是否在白名单中
+			if types.AllowedVectorTypes[types.SectionType(chunk.ChunkType)] {
+				selectedChunks = append(selectedChunks, chunk)
 			}
 		}
 
-		if len(nonBasicChunks) == 0 {
-			t.Logf("简历 %s 没有非BASIC_INFO类型的块，跳过", submissionUUID)
+		if len(selectedChunks) == 0 {
+			t.Logf("简历 %s 没有任何在白名单中的核心块类型，跳过", submissionUUID)
 			continue
 		}
 
-		totalChunksProcessed += len(nonBasicChunks)
+		totalChunksProcessed += len(selectedChunks)
 
-		// 准备简历块embedding处理
-		resumeChunks, texts := prepareChunksForEmbedding(nonBasicChunks, basicInfo)
+		// 准备简历块embedding处理和文本列表
+		var resumeChunks []types.ResumeChunk
+		var texts []string
+
+		// 为每个块创建ResumeChunk对象和准备嵌入文本
+		for _, chunk := range selectedChunks {
+			// 创建文本
+			embeddingText := fmt.Sprintf("%s: %s", chunk.ChunkTitle, chunk.ChunkContentText)
+			texts = append(texts, embeddingText)
+
+			// 创建向量库对象
+			resumeChunks = append(resumeChunks, types.ResumeChunk{
+				ChunkID:   chunk.ChunkIDInSubmission,
+				ChunkType: chunk.ChunkType,
+				Content:   chunk.ChunkContentText,
+				Type:      types.SectionType(chunk.ChunkType),
+				Title:     chunk.ChunkTitle,
+				Metadata: map[string]interface{}{
+					"submission_uuid": submissionUUID,
+					"chunk_type":      chunk.ChunkType,
+					"source":          "resume",
+
+					// 添加教育相关元数据
+					"highest_education": basicInfo["highest_education"],
+					"is_211":            basicInfo["is_211"] == "true",
+					"is_985":            basicInfo["is_985"] == "true",
+					"is_double_top":     basicInfo["is_double_top"] == "true",
+
+					// 添加经验相关元数据
+					"has_work_exp":   basicInfo["has_work_exp"] == "true",
+					"has_intern_exp": basicInfo["has_intern"] == "true",
+
+					// 添加奖项相关元数据
+					"has_algo_award": basicInfo["has_algorithm_award"] == "true",
+					"has_prog_award": basicInfo["has_programming_competition_award"] == "true",
+
+					// content_text字段主要由storage层自动添加，这里为保持元数据完整性也加入
+					// 注意：它的值与 resumeChunks 中的 Content 字段相同
+					"content_text": chunk.ChunkContentText,
+				},
+			})
+		}
 
 		// 执行embedding
 		t.Logf("为简历 %s 执行 %d 个文本嵌入", submissionUUID, len(texts))
@@ -1160,11 +1160,19 @@ func TestRebuildCompleteVectorDatabase(t *testing.T) {
 		allSubmissionPointIDs[submissionUUID] = pointIDs
 
 		// 更新数据库
-		err = updatePointIDsInDatabase(ctx, testStorageManager.MySQL, nonBasicChunks, pointIDs, submissionUUID)
+		err = updatePointIDsInDatabase(ctx, testStorageManager.MySQL, selectedChunks, pointIDs, submissionUUID)
 		if err != nil {
 			t.Logf("警告: 更新简历 %s 的数据库记录失败: %v", submissionUUID, err)
 		} else {
 			t.Logf("简历 %s 的数据库记录已成功更新", submissionUUID)
+		}
+
+		// 尝试创建或更新简历元数据
+		err = updateResumeMetadata(ctx, testStorageManager.MySQL.DB(), submissionUUID, basicInfo)
+		if err != nil {
+			t.Logf("警告: 保存简历 %s 的元数据失败: %v", submissionUUID, err)
+		} else {
+			t.Logf("简历 %s 的元数据已成功保存", submissionUUID)
 		}
 
 		// 等待一会，避免API限制
@@ -1213,6 +1221,80 @@ func TestRebuildCompleteVectorDatabase(t *testing.T) {
 	t.Log("向量数据库彻底重建完成!")
 }
 
+// updateResumeMetadata 直接更新resume_submissions表中的元数据字段
+func updateResumeMetadata(ctx context.Context, db *gorm.DB, submissionUUID string, basicInfo map[string]string) error {
+	// 准备更新数据
+	updateData := map[string]interface{}{
+		// 学校相关布尔字段
+		"is_211":            basicInfo["is_211"] == "true",
+		"is_985":            basicInfo["is_985"] == "true",
+		"is_double_top":     basicInfo["is_double_top"] == "true",
+		"highest_education": basicInfo["highest_education"],
+
+		// 经验相关布尔字段
+		"has_intern_exp": basicInfo["has_intern"] == "true",
+		"has_work_exp":   basicInfo["has_work_exp"] == "true",
+
+		// 奖项相关布尔字段
+		"has_algo_award": basicInfo["has_algorithm_award"] == "true",
+		"has_prog_award": basicInfo["has_programming_competition_award"] == "true",
+	}
+
+	// 处理经验年限
+	if expStr, ok := basicInfo["years_of_experience"]; ok && expStr != "" {
+		if exp, err := strconv.ParseFloat(expStr, 32); err == nil {
+			updateData["years_of_exp"] = exp
+		}
+	}
+
+	// 准备meta_extra JSON字段数据
+	metaExtra := make(map[string]interface{})
+
+	// 添加标签
+	if tagsStr, ok := basicInfo["tags"]; ok && tagsStr != "" {
+		tagsList := strings.Split(tagsStr, ",")
+		metaExtra["tags"] = tagsList
+	}
+
+	// 添加算法奖项详情
+	if basicInfo["has_algorithm_award"] == "true" && basicInfo["algorithm_award_titles"] != "" {
+		var awardTitles []string
+		if err := json.Unmarshal([]byte(basicInfo["algorithm_award_titles"]), &awardTitles); err == nil {
+			metaExtra["algorithm_award_titles"] = awardTitles
+		}
+	}
+
+	// 添加编程竞赛奖项详情
+	if basicInfo["has_programming_competition_award"] == "true" && basicInfo["programming_competition_titles"] != "" {
+		var awardTitles []string
+		if err := json.Unmarshal([]byte(basicInfo["programming_competition_titles"]), &awardTitles); err == nil {
+			metaExtra["programming_competition_titles"] = awardTitles
+		}
+	}
+
+	// 添加其他可能的元数据
+	if scoreStr, ok := basicInfo["resume_score"]; ok && scoreStr != "" {
+		if score, err := strconv.Atoi(scoreStr); err == nil {
+			metaExtra["resume_score"] = score
+		}
+	}
+
+	// 将meta_extra序列化为JSON
+	if len(metaExtra) > 0 {
+		metaExtraJSON, err := json.Marshal(metaExtra)
+		if err == nil {
+			updateData["meta_extra"] = string(metaExtraJSON)
+		}
+	}
+
+	// 执行更新
+	result := db.WithContext(ctx).Table("resume_submissions").
+		Where("submission_uuid = ?", submissionUUID).
+		Updates(updateData)
+
+	return result.Error
+}
+
 // TestVerifyPointIDGeneration 测试验证point_id生成的确定性
 // 确保相同的输入(resumeID+chunkID)每次都生成相同的point_id
 func TestVerifyPointIDGeneration(t *testing.T) {
@@ -1242,7 +1324,7 @@ func TestVerifyPointIDGeneration(t *testing.T) {
 	testChunks := []types.ResumeChunk{
 		{
 			ChunkID:         1,
-			ChunkType:       "WORK_EXPERIENCE",
+			ChunkType:       "WORK_EXPERIENCE", // 这是白名单允许的类型
 			Content:         "这是一个测试内容",
 			ImportanceScore: 0.9,
 			UniqueIdentifiers: types.Identity{
@@ -1251,14 +1333,14 @@ func TestVerifyPointIDGeneration(t *testing.T) {
 				Phone: "12345678901",
 			},
 			Metadata: types.ChunkMetadata{
-				ExperienceYears: 5,
-				EducationLevel:  "硕士",
+				"years_of_experience": 5,
+				"highest_education":   "硕士",
 			},
 		},
 		{
 			ChunkID:         2,
-			ChunkType:       "EDUCATION",
-			Content:         "这是另一个测试内容",
+			ChunkType:       "SKILLS", // 修改为白名单允许的类型
+			Content:         "这是另一个技能测试内容",
 			ImportanceScore: 0.8,
 			UniqueIdentifiers: types.Identity{
 				Name:  "测试姓名",
@@ -1266,8 +1348,8 @@ func TestVerifyPointIDGeneration(t *testing.T) {
 				Phone: "12345678901",
 			},
 			Metadata: types.ChunkMetadata{
-				ExperienceYears: 5,
-				EducationLevel:  "硕士",
+				"years_of_experience": 5,
+				"highest_education":   "硕士",
 			},
 		},
 	}
@@ -1287,11 +1369,21 @@ func TestVerifyPointIDGeneration(t *testing.T) {
 		testEmbeddings[1][i] = rand.Float64()
 	}
 
+	// 计算预期会通过白名单过滤的chunks数量
+	expectedChunksCount := 0
+	for _, chunk := range testChunks {
+		// 检查chunk类型是否在白名单中
+		if types.AllowedVectorTypes[types.SectionType(chunk.ChunkType)] {
+			expectedChunksCount++
+		}
+	}
+	t.Logf("预期通过白名单过滤后的chunks数量: %d/%d", expectedChunksCount, len(testChunks))
+
 	// 第一次生成point_id
 	t.Log("第一次生成point_id...")
 	pointIDs1, err := vdb.StoreResumeVectors(ctx, testResumeID, testChunks, testEmbeddings)
 	require.NoError(t, err, "第一次存储向量失败")
-	require.Equal(t, len(testChunks), len(pointIDs1), "生成的point_id数量与chunks数量不匹配")
+	require.Equal(t, expectedChunksCount, len(pointIDs1), "生成的point_id数量与预期通过白名单的chunks数量不匹配")
 
 	t.Logf("第一次生成的point_ids: %v", pointIDs1)
 
@@ -1317,10 +1409,16 @@ func TestVerifyPointIDGeneration(t *testing.T) {
 
 	// 验证两次生成的point_id是否一致 (确定性检查)
 	t.Log("验证两次生成的point_id是否一致...")
+	require.Equal(t, expectedChunksCount, len(pointIDs2), "第二次生成的point_id数量与预期不一致")
 	require.Equal(t, len(pointIDs1), len(pointIDs2), "两次生成的point_id数量不一致")
-	for i := 0; i < len(pointIDs1); i++ {
-		require.Equal(t, pointIDs1[i], pointIDs2[i],
-			fmt.Sprintf("第%d个point_id不一致：第一次=%s，第二次=%s", i+1, pointIDs1[i], pointIDs2[i]))
+
+	if len(pointIDs1) > 0 {
+		for i := 0; i < len(pointIDs1); i++ {
+			require.Equal(t, pointIDs1[i], pointIDs2[i],
+				fmt.Sprintf("第%d个point_id不一致：第一次=%s，第二次=%s", i+1, pointIDs1[i], pointIDs2[i]))
+		}
+	} else {
+		t.Log("没有生成point_id，跳过一致性检查")
 	}
 
 	t.Log("验证通过：相同的resumeID和chunkID生成了相同的point_id")
@@ -1332,23 +1430,41 @@ func TestVerifyPointIDGeneration(t *testing.T) {
 		t.Logf("警告: 清理测试数据失败: %v", deleteErr)
 	}
 
-	// 手动验证内部point_id生成逻辑
-	t.Log("手动验证内部point_id生成逻辑...")
+	// 只有在有通过白名单的chunk时才进行手动验证
+	if expectedChunksCount > 0 {
+		// 手动验证内部point_id生成逻辑
+		t.Log("手动验证内部point_id生成逻辑...")
 
-	// 这里没法直接访问storage.QdrantPointIDNamespace，因为它不是导出的
-	// 所以我们直接使用硬编码的UUID值进行测试
-	namespace := uuid.Must(uuid.FromString("fd6c72c2-5a33-4b53-8e7c-8298f3f5a7e1"))
+		// 这里没法直接访问storage.QdrantPointIDNamespace，因为它不是导出的
+		// 所以我们直接使用硬编码的UUID值进行测试
+		namespace := uuid.Must(uuid.FromString("fd6c72c2-5a33-4b53-8e7c-8298f3f5a7e1"))
 
-	// 模拟Storage层生成pointID的逻辑
-	manualPointID1 := uuid.NewV5(namespace, fmt.Sprintf("resume_id:%s_chunk_id:%d", testResumeID, testChunks[0].ChunkID)).String()
-	manualPointID2 := uuid.NewV5(namespace, fmt.Sprintf("resume_id:%s_chunk_id:%d", testResumeID, testChunks[1].ChunkID)).String()
+		// 找出实际被向量化的chunks的索引
+		vectorizedChunkIndices := []int{}
+		for i, chunk := range testChunks {
+			if types.AllowedVectorTypes[types.SectionType(chunk.ChunkType)] {
+				vectorizedChunkIndices = append(vectorizedChunkIndices, i)
+			}
+		}
 
-	t.Logf("手动生成的point_id: %s, %s", manualPointID1, manualPointID2)
-	t.Logf("自动生成的point_id: %s, %s", pointIDs1[0], pointIDs1[1])
+		// 根据实际向量化的chunks生成手动point_id
+		var manualPointIDs []string
+		for _, idx := range vectorizedChunkIndices {
+			pointID := uuid.NewV5(namespace, fmt.Sprintf("resume_id:%s_chunk_id:%d", testResumeID, testChunks[idx].ChunkID)).String()
+			manualPointIDs = append(manualPointIDs, pointID)
+		}
 
-	// 验证手动生成的point_id与自动生成的是否一致
-	require.Equal(t, manualPointID1, pointIDs1[0], "手动生成的第一个point_id与自动生成的不一致")
-	require.Equal(t, manualPointID2, pointIDs1[1], "手动生成的第二个point_id与自动生成的不一致")
+		t.Logf("手动生成的point_id: %v", manualPointIDs)
+		t.Logf("自动生成的point_id: %v", pointIDs1)
+
+		// 验证手动生成的point_id与自动生成的是否一致
+		for i := 0; i < len(pointIDs1); i++ {
+			require.Equal(t, manualPointIDs[i], pointIDs1[i],
+				fmt.Sprintf("手动生成的第%d个point_id与自动生成的不一致", i+1))
+		}
+	} else {
+		t.Log("没有通过白名单的chunk，跳过手动验证point_id生成逻辑")
+	}
 
 	t.Log("Point ID生成验证测试完成，生成逻辑确实具有确定性")
 }

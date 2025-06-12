@@ -57,7 +57,7 @@ func NewAliyunEmbedder(apiKey string, embeddingCfg config.EmbeddingConfig) (*Ali
 
 	model := embeddingCfg.Model
 	if model == "" {
-		model = "text-embedding-v3" // Fallback default
+		model = "text-embedding-v4" // Fallback default
 	}
 	dimensions := embeddingCfg.Dimensions
 	baseURL := embeddingCfg.BaseURL
@@ -86,7 +86,7 @@ func (a *AliyunEmbedder) GetDimensions() int {
 type AliyunOpenAIEmbeddingRequest struct {
 	Input          interface{} `json:"input"` // string or []string
 	Model          string      `json:"model"`
-	Dimensions     int         `json:"dimensions,omitempty"`      // Optional, for text-embedding-v3
+	Dimensions     int         `json:"dimensions,omitempty"`      // Optional, for text-embedding-v4
 	EncodingFormat string      `json:"encoding_format,omitempty"` // Optional, e.g., "float"
 }
 

@@ -619,17 +619,23 @@ func (rp *ResumeProcessor) ProcessLLMTasks(ctx context.Context, message storaget
 	// 执行Qdrant写入
 	var pointIDs []string
 	if rp.Storage.Qdrant != nil { // 检查是否初始化
-		pointIDs, err = rp.Storage.Qdrant.StoreResumeVectors(ctx, message.SubmissionUUID, qdrantChunks, floatEmbeddings) // 存储向量
-		if err != nil {                                                                                                  // 如果存储失败
-			rp.logInfo("ProcessLLMTasks: 存储向量到Qdrant失败 for %s: %v", message.SubmissionUUID, err)
-			// 更新状态为失败
-			updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusQdrantStoreFailed)
-			if updateErr != nil {
-				rp.logInfo("更新状态为 QDRANT_STORE_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
+		// 如果有核心分块需要存储到向量库
+		if len(qdrantChunks) > 0 && len(floatEmbeddings) > 0 {
+			pointIDs, err = rp.Storage.Qdrant.StoreResumeVectors(ctx, message.SubmissionUUID, qdrantChunks, floatEmbeddings) // 存储向量
+			if err != nil {                                                                                                  // 如果存储失败
+				rp.logInfo("ProcessLLMTasks: 存储向量到Qdrant失败 for %s: %v", message.SubmissionUUID, err)
+				// 更新状态为失败
+				updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusQdrantStoreFailed)
+				if updateErr != nil {
+					rp.logInfo("更新状态为 QDRANT_STORE_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
+				}
+				return fmt.Errorf("存储向量到Qdrant失败: %w", err)
 			}
-			return fmt.Errorf("存储向量到Qdrant失败: %w", err)
+			rp.logDebug("[ProcessLLMTasks] 成功存储 %d 个向量到Qdrant for %s", len(pointIDs), message.SubmissionUUID)
+		} else {
+			// 如果只有BASIC_INFO，记录日志但不要报错
+			rp.logInfo("ProcessLLMTasks: 无核心分块可存储到Qdrant (可能只有BASIC_INFO) for %s", message.SubmissionUUID)
 		}
-		rp.logDebug("[ProcessLLMTasks] 成功存储 %d 个向量到Qdrant for %s", len(pointIDs), message.SubmissionUUID)
 	} else { // 如果未初始化
 		return fmt.Errorf("qdrant存储服务未初始化")
 	}
@@ -686,6 +692,19 @@ func (rp *ResumeProcessor) _downloadAndChunkResume(ctx context.Context, message 
 		rp.logInfo("ProcessLLMTasks: LLM简历分块结果为空 for %s", message.SubmissionUUID)
 		return "", nil, nil, fmt.Errorf("LLM简历分块结果为空")
 	}
+
+	// 检查是否只有BASIC_INFO分块，无需返回错误
+	var nonBasicInfoCount int
+	for _, section := range sections {
+		if section.Type != types.SectionBasicInfo {
+			nonBasicInfoCount++
+		}
+	}
+
+	// 即使只有BASIC_INFO，也允许处理继续
+	if nonBasicInfoCount == 0 {
+		rp.logInfo("ProcessLLMTasks: 只有BASIC_INFO分块 for %s，无需向量化", message.SubmissionUUID)
+	}
 	rp.logDebug("[ProcessLLMTasks] LLM简历分块成功 for %s. 分块数量: %d", message.SubmissionUUID, len(sections))
 	return parsedText, sections, basicInfo, nil // 返回解析文本、分块、基本信息和nil错误
 }
@@ -734,7 +753,7 @@ func (rp *ResumeProcessor) _embedChunks(ctx context.Context, sections []*types.R
 // 此方法已经假设Qdrant写入已在事务外完成，不再包含Qdrant写入逻辑
 func (rp *ResumeProcessor) _executeLLMProcessingTransaction(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeProcessingMessage, qdrantChunks []types.ResumeChunk, floatEmbeddings [][]float64, sections []*types.ResumeSection, basicInfo map[string]string, parsedText string, pointIDs []string) error {
 	// 此处PointID已通过外部Qdrant.StoreResumeVectors调用获取并传入
-	// 不再需要从qdrantChunks中提取
+	// 注意：pointIDs的长度可能与sections不同，因为只有核心分块会写入Qdrant
 
 	// 1. 查找或创建候选人
 	var candidateID string
@@ -756,12 +775,13 @@ func (rp *ResumeProcessor) _executeLLMProcessingTransaction(ctx context.Context,
 		}
 	}
 
-	// 2. 保存简历分块到MySQL
-	if err := rp.Storage.MySQL.SaveResumeChunks(tx, message.SubmissionUUID, sections, pointIDs); err != nil { // 保存分块信息到MySQL
+	// 2. 保存简历分块到MySQL - 所有分块都入库，但只有核心分块可能有pointID
+	if err := rp.Storage.MySQL.SaveResumeChunks(tx, message.SubmissionUUID, sections, pointIDs); err != nil {
 		rp.logInfo("ProcessLLMTasks: 保存简历分块到MySQL失败 for %s: %v", message.SubmissionUUID, err)
 		return fmt.Errorf("保存简历分块到MySQL失败: %w", err)
 	}
-	rp.logDebug("[ProcessLLMTasks] 成功保存 %d 个简历分块信息到MySQL for %s", len(sections), message.SubmissionUUID)
+	rp.logDebug("[ProcessLLMTasks] 成功保存 %d 个简历分块信息到MySQL for %s, 其中 %d 个核心分块也写入了向量数据库",
+		len(sections), message.SubmissionUUID, len(pointIDs))
 
 	// 3. 准备并执行最终的数据库更新
 	updates := rp._prepareFinalDBUpdates(basicInfo, pointIDs, candidateID)                                                                   // 准备最终更新的数据
@@ -849,10 +869,15 @@ func (rp *ResumeProcessor) _prepareQdrantData(submissionUUID string, sections []
 
 	// 遍历处理每个分块向量
 	for i, chunkVector := range chunkEmbeddings {
-		// 跳过 BASIC_INFO 类型的分块，不存储到向量数据库
-		if chunkVector.Section != nil && chunkVector.Section.Type == types.SectionBasicInfo {
+		if chunkVector.Section == nil {
+			continue
+		}
+
+		// 使用全局的AllowedVectorTypes白名单来过滤，只有在白名单中的类型才会被存入向量数据库
+		if !types.AllowedVectorTypes[chunkVector.Section.Type] {
 			if rp.Config.Debug {
-				rp.Config.Logger.Printf("跳过BASIC_INFO分块，不存入向量数据库, 分块ID: %d", i+1)
+				rp.Config.Logger.Printf("跳过非核心分块类型 %s，不存入向量数据库, 分块ID: %d",
+					string(chunkVector.Section.Type), chunkVector.Section.ChunkID)
 			}
 			continue
 		}
@@ -875,20 +900,21 @@ func (rp *ResumeProcessor) _prepareQdrantData(submissionUUID string, sections []
 				Phone: candidatePhone,
 				Email: candidateEmail,
 			},
-			Metadata: types.ChunkMetadata{
-				ExperienceYears: globalExpYears,
-				EducationLevel:  globalEduLevel,
-			},
+			Metadata: make(types.ChunkMetadata),
 		}
+
+		// 添加基本元数据
+		chunk.Metadata["years_of_experience"] = globalExpYears
+		chunk.Metadata["highest_education"] = globalEduLevel
 
 		// 添加特定的元数据信息（如果存在）
 		if chunkVector.Metadata != nil {
-			if specificExp, ok := chunkVector.Metadata["experience_years"].(int); ok {
-				chunk.Metadata.ExperienceYears = specificExp
+			// 拷贝所有现有元数据
+			for k, v := range chunkVector.Metadata {
+				chunk.Metadata[k] = v
 			}
-			if specificEdu, ok := chunkVector.Metadata["education_level"].(string); ok {
-				chunk.Metadata.EducationLevel = specificEdu
-			}
+
+			// 设置重要性分数
 			if score, ok := chunkVector.Metadata["importance_score"].(float32); ok {
 				chunk.ImportanceScore = score
 			} else if scoreF64, ok := chunkVector.Metadata["importance_score"].(float64); ok {
@@ -901,7 +927,10 @@ func (rp *ResumeProcessor) _prepareQdrantData(submissionUUID string, sections []
 	}
 
 	if len(chunks) == 0 {
-		return nil, nil, fmt.Errorf("过滤BASIC_INFO后没有可存储的分块")
+		// 如果只有BASIC_INFO，返回空数组而不是错误
+		rp.logInfo("没有符合核心分块类型的内容可存储到向量数据库，但允许处理继续")
+		// 返回空数组，这样调用代码可以检测并适应这种情况
+		return []types.ResumeChunk{}, [][]float64{}, nil
 	}
 
 	return chunks, embeddings, nil

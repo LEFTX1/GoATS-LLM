@@ -1,0 +1,424 @@
+{
+  "job_id": "job-pagination-test-002",
+  "cursor": 10,
+  "next_cursor": 20,
+  "size": 10,
+  "total_count": 119,
+  "resumes": [
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000037",
+      "original_filename": "狮驼王_本科简历.pdf",
+      "candidate_name": "狮驼王",
+      "highest_education": "未知",
+      "years_of_exp": 0,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "shituo.wang.go@example.com",
+        "name": "狮驼王",
+        "phone": "13511110037",
+        "tags": "Go,应届生,本科,985",
+        "years_of_experience": "0"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "狮驼王 | 本科应届生 | 北京大学"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "熟悉Go语言。熟悉数据结构与算法、操作系统、计算机网络。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "PROJECTS",
+          "chunk_title": "项目",
+          "content_text": "参与开发一个基于Go的校园BBS系统。我负责了用户注册和发帖功能的后端API实现。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "INTERNSHIPS",
+          "chunk_title": "实习经历",
+          "content_text": "某知名互联网公司 | 软件开发实习生 (大三暑期)\n职责: 在导师的指导下，参与了核心产品的某个功能模块开发。学习了公司的开发流程和代码规范，并使用Git进行版本控制。通过修复一些简单的Bug，提升了问题定位和解决能力。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000025",
+      "original_filename": "蜘蛛精_Go后端.pdf",
+      "candidate_name": "蜘蛛精",
+      "highest_education": "未知",
+      "years_of_exp": 4,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "zhizhu.jing.go@example.com",
+        "name": "蜘蛛精",
+        "phone": "13811110025",
+        "tags": "Go,后端,Gin,GORM,API开发",
+        "years_of_experience": "4"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "蜘蛛精 | Go Backend Developer | 13811110025"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "熟练使用Go语言，Gin框架。熟悉使用GORM操作MySQL。了解RESTful API设计原则。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "内容管理系统 (CMS) 后端\n职责: 负责文章、评论、用户管理等模块的API接口开发。使用Gin框架提供服务，通过GORM与数据库交互。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000028",
+      "original_filename": "奔波儿灞_JavaGo.pdf",
+      "candidate_name": "奔波儿灞",
+      "highest_education": "未知",
+      "years_of_exp": 8,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "benboer.ba.go@example.com",
+        "name": "奔波儿灞",
+        "phone": "13611110028",
+        "tags": "Go,Java,微服务,Spring Cloud,转型",
+        "years_of_experience": "8"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "奔波儿灞 | Senior Backend Engineer | 13611110028"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Java, Spring Cloud。熟悉Go语言和Gin。分布式系统思想是通用的。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "新业务线后端开发\n职责: 负责新业务线的技术选型和开发。我们选择了Go作为主要开发语言。我带领小团队使用Go和Gin框架，快速搭建了业务后端。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000044",
+      "original_filename": "黄袍怪_SDK.pdf",
+      "candidate_name": "黄袍怪",
+      "highest_education": "未知",
+      "years_of_exp": 5,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "huangpao.guai.go@example.com",
+        "name": "黄袍怪",
+        "phone": "13911110044",
+        "tags": "Go,SDK,API封装,多语言",
+        "years_of_experience": "5"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "黄袍怪 | SDK Engineer | 13911110044"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉API设计和封装。了解Java和Python。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "统一存储服务SDK\n职责: 我们的后端有一个统一的存储服务，我负责为其开发Go语言版本的SDK。SDK封装了复杂的API调用和签名逻辑，向上层业务开发者提供简洁易用的接口。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197e5a2-d001-e001-f001-000000000011",
+      "original_filename": "郑浩_数据开发.pdf",
+      "candidate_name": "郑浩",
+      "highest_education": "未知",
+      "years_of_exp": 5,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "zheng.hao@example.com",
+        "name": "郑浩",
+        "phone": "13620110011",
+        "tags": "Go,大数据,ETL,Kafka,高并发",
+        "years_of_experience": "5"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "郑浩 | Data Engineer | 13620110011"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "熟练使用Go进行高并发数据处理。熟悉Kafka消费者组。熟悉Spark。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "实时数据处理管道\n职责: 使用Go编写消费者服务，从Kafka中实时消费日志数据，进行清洗、转换后写入ClickHouse。充分利用Go的并发能力，实现高吞吐量的数据处理。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197c3d2-dddd-eeee-ffff-200000000008",
+      "original_filename": "冯涛_Golang.md",
+      "candidate_name": "冯涛",
+      "highest_education": "未知",
+      "years_of_exp": 3,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "education_level": "本科",
+        "email": "feng.tao.go@example.com",
+        "location": "深圳",
+        "name": "冯涛",
+        "phone": "13699887766",
+        "position": "Golang后端工程师",
+        "tags": "Golang,微服务,gRPC,Kubernetes,云原生",
+        "years_of_experience": "3"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "冯涛 | Go Developer | 13699887766 | feng.tao.go@example.com | GitHub: github.com/fengtao-go"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "EDUCATION",
+          "chunk_title": "教育经历",
+          "content_text": "西安电子科技大学 | 计算机科学 | 本科 | 2014-09 ~ 2018-06"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技术栈",
+          "content_text": "语言: 精通 Golang, 熟悉其并发编程模型(Goroutine/Channel)和内存管理。\n框架: 熟练使用 Gin, Go-Micro, gRPC 进行微服务开发。\n云原生: 熟练使用 Docker, Kubernetes 进行应用容器化和编排。熟悉 Prometheus 进行监控。\n数据库/中间件: 熟悉 MySQL, Redis, Kafka, etcd。\n其他: 熟悉 Linux 环境和常用命令。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "高可用IM消息网关 (2020-05 ~ 至今)\n职责: 负责IM系统的TCP/WebSocket长连接网关开发。使用Go语言实现，单机可维持百万级长连接。服务间通过gRPC通信，使用etcd进行服务发现。整个服务部署在K8s集群中，实现了高可用和弹性伸缩。\n\n广告投放系统重构 (2018-07 ~ 2020-04)\n职责: 参与将原有的PHP单体广告系统重构为Go微服务架构。我负责其中的物料管理和报表服务开发，接口性能平均提升3倍以上。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000020",
+      "original_filename": "嫦娥_分布式缓存.pdf",
+      "candidate_name": "嫦娥",
+      "highest_education": "未知",
+      "years_of_exp": 7,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "change.go@example.com",
+        "name": "嫦娥",
+        "phone": "13911110020",
+        "tags": "Go,分布式缓存,Redis,一致性哈希,高性能",
+        "years_of_experience": "7"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "嫦娥 | Distributed Cache Engineer | 13911110020"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉Redis协议。深入理解一致性哈希算法。熟悉LRU, LFU等缓存淘汰算法。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "自研分布式缓存系统 \"MoonCache\"\n职责: 核心开发者。使用Go语言从零实现了一个兼容Redis协议的分布式缓存。通过一致性哈希实现节点的水平扩展。支持多种数据结构。性能对标开源的Codis/Twemproxy。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000043",
+      "original_filename": "蜈蚣精_数据开发.pdf",
+      "candidate_name": "蜈蚣精",
+      "highest_education": "未知",
+      "years_of_exp": 6,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "wugong.jing.go@example.com",
+        "name": "蜈蚣精",
+        "phone": "13511110043",
+        "tags": "Go,数据开发,ETL,高并发",
+        "years_of_experience": "6"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "蜈蚣精 | Go Data Engineer | 13511110043"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉并发编程模型，用于数据处理。熟悉Kafka。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "实时数据ETL管道\n职责: 负责开发数据管道。使用Go编写高并发的消费者程序，从Kafka读取原始日志，进行解析、转换、丰富后，写入数据仓库。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000038",
+      "original_filename": "象王_硕士简历.pdf",
+      "candidate_name": "象王",
+      "highest_education": "未知",
+      "years_of_exp": 0,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "xiang.wang.go@example.com",
+        "name": "象王",
+        "phone": "13911110038",
+        "tags": "Go,应届生,硕士,分布式系统,Raft",
+        "years_of_experience": "0"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "象王 | 硕士应届生 | 清华大学"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go语言。深入理解分布式共识算法。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "PROJECTS",
+          "chunk_title": "毕业设计",
+          "content_text": "使用Go语言实现了一个简化的Raft共识库，并通过了基础的一致性测试。对etcd/raft源码有一定了解。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "INTERNSHIPS",
+          "chunk_title": "实习经历",
+          "content_text": "某知名互联网公司 | 软件开发实习生 (大三暑期)\n职责: 在导师的指导下，参与了核心产品的某个功能模块开发。学习了公司的开发流程和代码规范，并使用Git进行版本控制。通过修复一些简单的Bug，提升了问题定位和解决能力。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197e5a2-d001-e001-f001-000000000010",
+      "original_filename": "吴敏_Go_Tools.pdf",
+      "candidate_name": "吴敏",
+      "highest_education": "未知",
+      "years_of_exp": 4,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "wu.min@example.com",
+        "name": "吴敏",
+        "phone": "13810100010",
+        "tags": "Go,CLI,工具链,CI/CD,自动化",
+        "years_of_experience": "4"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "吴敏 | Go Tooling Engineer | 13810100010"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go语言，熟悉Cobra, Viper等库。熟悉Jenkins插件开发。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "自动化部署工具\n职责: 使用Go开发了一款命令行工具，用于自动化部署微服务到K8s集群，集成了配置渲染、版本管理等功能。\n代码质量扫描插件\n职责: 为Jenkins开发了一款Go插件，用于扫描Go代码的复杂度、重复率等，并生成报告。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    }
+  ]
+}

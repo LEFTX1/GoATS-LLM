@@ -336,12 +336,53 @@ func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks
 		return []string{}, nil
 	}
 
-	// 准备要存储的点
-	points := make([]interface{}, 0, len(embeddings))
-	ids := make([]string, 0, len(embeddings))
+	// 使用全局允许的向量类型白名单
+	// 记录过滤前的块数
+	totalChunks := len(chunks)
+	var filteredChunks []types.ResumeChunk
+	var filteredEmbeddings [][]float64
 
-	// 遍历所有chunk和embedding
-	for i, embedding := range embeddings {
+	// 过滤只保留允许的块类型
+	for i, chunk := range chunks {
+		// 将字符串类型转换为SectionType进行检查
+		chunkType := types.SectionType(chunk.ChunkType)
+		// 使用明确的存在性检查，而不是布尔值检查
+		if _, ok := types.AllowedVectorTypes[chunkType]; ok {
+			filteredChunks = append(filteredChunks, chunk)
+			filteredEmbeddings = append(filteredEmbeddings, embeddings[i])
+			// 添加调试日志
+			span.AddEvent("debug.allow_chunk",
+				trace.WithAttributes(attribute.String("chunk_type", chunk.ChunkType)))
+		} else {
+			// 添加调试日志，记录被过滤的块类型
+			span.AddEvent("debug.filter_chunk",
+				trace.WithAttributes(attribute.String("chunk_type", chunk.ChunkType)))
+		}
+	}
+
+	// 添加过滤操作的跟踪信息
+	filteredCount := len(filteredChunks)
+	span.SetAttributes(
+		attribute.Int("vectors.total_count", totalChunks),
+		attribute.Int("vectors.filtered_count", filteredCount),
+		attribute.String("vectors.filter_type", "allowed_vector_types"),
+	)
+
+	// 如果过滤后没有剩余块，则返回空列表
+	if filteredCount == 0 {
+		span.AddEvent("info", trace.WithAttributes(
+			attribute.String("message", "过滤后没有允许的类型块"),
+		))
+		span.SetStatus(codes.Ok, "no allowed chunks to store")
+		return []string{}, nil
+	}
+
+	// 准备要存储的点
+	points := make([]interface{}, 0, filteredCount)
+	ids := make([]string, 0, filteredCount)
+
+	// 遍历所有过滤后的chunk和embedding
+	for i, embedding := range filteredEmbeddings {
 		if len(embedding) != q.vectorSize {
 			err := fmt.Errorf("向量维度(%d)与配置维度(%d)不匹配", len(embedding), q.vectorSize)
 			span.RecordError(err)
@@ -349,7 +390,7 @@ func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks
 			return nil, err
 		}
 
-		chunk := chunks[i]
+		chunk := filteredChunks[i]
 		// 生成一个确定性的唯一ID，基于 resumeID 和 chunk ID
 		// 使用 resumeID 和 chunk 的唯一标识符作为源来保证幂等性
 		idSource := fmt.Sprintf("resume_id:%s_chunk_id:%d", resumeID, chunk.ChunkID)
@@ -358,37 +399,65 @@ func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks
 
 		// 准备payload，包含所有需要存储的元数据
 		payload := map[string]interface{}{
-			"submission_uuid":  resumeID, // 使用 submission_uuid 作为键
-			"chunk_idx":        i,
-			"chunk_id":         chunk.ChunkID,
-			"content":          tracing.SafeResumeContent(chunk.Content), // 安全处理简历内容
-			"chunk_type":       chunk.ChunkType,
-			"chunk_title":      chunk.ChunkTitle, // 使用Section的Title作为标题
-			"importance_score": chunk.ImportanceScore,
+			"chunk_id":        chunk.ChunkID,
+			"chunk_type":      chunk.ChunkType,
+			"submission_uuid": resumeID,
+			"content_text":    truncateString(chunk.Content, 1000), // 限制内容长度
+			"source":          "resume",
 		}
 
-		// 添加唯一标识符 - 使用安全处理防止PII泄露
+		// 添加标识信息
 		if chunk.UniqueIdentifiers.Name != "" {
-			payload["name"] = tracing.MaskPII(chunk.UniqueIdentifiers.Name)
+			payload["candidate_name"] = chunk.UniqueIdentifiers.Name
 		}
 		if chunk.UniqueIdentifiers.Email != "" {
-			payload["email"] = tracing.MaskPII(chunk.UniqueIdentifiers.Email)
+			payload["candidate_email"] = chunk.UniqueIdentifiers.Email
 		}
 		if chunk.UniqueIdentifiers.Phone != "" {
-			payload["phone"] = tracing.MaskPII(chunk.UniqueIdentifiers.Phone)
+			payload["candidate_phone"] = chunk.UniqueIdentifiers.Phone
 		}
 
-		// 添加元数据
-		if chunk.Metadata.ExperienceYears > 0 {
-			payload["experience_years"] = chunk.Metadata.ExperienceYears
-		}
-		if chunk.Metadata.EducationLevel != "" {
-			payload["education_level"] = chunk.Metadata.EducationLevel
+		// 使用ChunkMetadata类型（现为Map）处理元数据
+		if chunk.Metadata != nil {
+			// 学校相关元数据
+			if v, ok := chunk.Metadata["is_211"].(bool); ok && v {
+				payload["is_211"] = true
+			}
+			if v, ok := chunk.Metadata["is_985"].(bool); ok && v {
+				payload["is_985"] = true
+			}
+			if v, ok := chunk.Metadata["is_double_top"].(bool); ok && v {
+				payload["is_double_top"] = true
+			}
+			if v, ok := chunk.Metadata["highest_education"].(string); ok && v != "" {
+				payload["education_level"] = v
+			}
+
+			// 经验相关元数据
+			if v, ok := chunk.Metadata["has_intern_exp"].(bool); ok && v {
+				payload["has_intern_exp"] = true
+			}
+			if v, ok := chunk.Metadata["has_work_exp"].(bool); ok && v {
+				payload["has_work_exp"] = true
+			}
+			if v, ok := chunk.Metadata["years_of_experience"].(float32); ok && v > 0 {
+				payload["years_of_experience"] = v
+			} else if v, ok := chunk.Metadata["years_of_experience"].(float64); ok && v > 0 {
+				payload["years_of_experience"] = v
+			}
+
+			// 奖项相关元数据
+			if v, ok := chunk.Metadata["has_algorithm_award"].(bool); ok && v {
+				payload["has_algo_award"] = true
+			}
+			if v, ok := chunk.Metadata["has_programming_competition_award"].(bool); ok && v {
+				payload["has_prog_award"] = true
+			}
 		}
 
-		// 创建向量点
+		// 创建point对象
 		point := map[string]interface{}{
-			"id":      pointID, // Qdrant 要求 ID 是 UUID 或 uint64
+			"id":      pointID,
 			"vector":  embedding,
 			"payload": payload,
 		}
@@ -396,42 +465,94 @@ func (q *Qdrant) StoreResumeVectors(ctx context.Context, resumeID string, chunks
 		points = append(points, point)
 	}
 
-	// 在span中记录首个chunk的简要信息 (安全处理)
-	if len(chunks) > 0 {
-		firstChunk := chunks[0]
-		span.SetAttributes(
-			attribute.String("sample.chunk_type", firstChunk.ChunkType),
-			attribute.Int("sample.importance_score", int(firstChunk.ImportanceScore*100)), // 转为整数
-			attribute.String("sample.content_preview", tracing.SafeResumeContent(firstChunk.Content)),
-		)
+	span.SetAttributes(
+		attribute.Int("points.count", len(points)),
+	)
+
+	if len(points) == 0 {
+		span.AddEvent("warning", trace.WithAttributes(
+			attribute.String("message", "生成的点为空，无需存储"),
+		))
+		span.SetStatus(codes.Ok, "no points to store")
+		return ids, nil
+	}
+
+	// 首先确保集合存在
+	err := q.ensureCollectionExists(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("确保集合存在失败: %w", err)
 	}
 
 	// 构造请求体
-	reqBody := map[string]interface{}{
+	requestBody := map[string]interface{}{
 		"points": points,
 	}
 
-	// 执行API调用
-	var result struct {
+	// 准备请求
+	endpoint := fmt.Sprintf("%s/collections/%s/points?wait=true", q.endpoint, q.collectionName)
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("序列化请求体失败: %w", err)
+	}
+
+	// 准备HTTP请求
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(jsonBody))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// 注入跟踪上下文到请求头
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+	// 执行请求
+	resp, err := q.httpClient.Do(req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("执行HTTP请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 解析响应体
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("读取响应体失败: %w", err)
+	}
+
+	// 检查响应状态码
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("API调用失败，状态码: %d，响应: %s", resp.StatusCode, string(body))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
+	var response struct {
 		Result struct {
 			Status string `json:"status"`
 		} `json:"result"`
 		Status string  `json:"status"`
 		Time   float64 `json:"time"`
 	}
-
-	// 使用doRequest方法发送请求
-	err := q.doRequest(ctx, "PUT", fmt.Sprintf("/collections/%s/points?wait=true", q.collectionName), reqBody, &result)
-	if err != nil {
+	if err := json.Unmarshal(body, &response); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return nil, err
+		return nil, fmt.Errorf("解析响应体失败: %w", err)
 	}
 
 	// 记录API响应信息
 	span.SetAttributes(
-		attribute.String("qdrant.response_status", result.Status),
-		attribute.Float64("qdrant.response_time", result.Time),
+		attribute.String("qdrant.response_status", response.Status),
+		attribute.Float64("qdrant.response_time", response.Time),
 	)
 
 	span.SetStatus(codes.Ok, "")
@@ -539,7 +660,7 @@ func (q *Qdrant) DeletePoints(ctx context.Context, pointIDs []string) error {
 		return nil
 	}
 
-	// 构造请求体
+	// 构造请求体 - 修改为符合 Qdrant ≥1.7 规范的格式
 	reqBody := map[string]interface{}{
 		"points": pointIDs,
 	}

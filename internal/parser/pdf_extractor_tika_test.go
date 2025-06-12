@@ -22,7 +22,7 @@ import (
 
 func TestNewTikaPDFExtractor(t *testing.T) {
 	// 加载配置
-	cfg, err := config.LoadConfigFromFileOnly("../../internal/config/config.yaml")
+	cfg, err := config.LoadConfigFromFileAndEnv("../../internal/config/config.yaml")
 	if err != nil {
 		t.Logf("无法加载配置文件: %v，使用默认URL", err)
 		cfg = &config.Config{}
@@ -344,7 +344,7 @@ func TestTikaUTF8HeaderIsSet(t *testing.T) {
 // 集成测试 - 如果有真实的Tika服务器可用，则运行
 func TestWithRealTikaServer(t *testing.T) {
 	// 加载配置
-	cfg, err := config.LoadConfigFromFileOnly("../../internal/config/config.yaml")
+	cfg, err := config.LoadConfigFromFileAndEnv("../../internal/config/config.yaml")
 	if err != nil {
 		t.Skip("无法加载配置文件，跳过真实Tika服务器测试")
 		return
@@ -440,7 +440,7 @@ func TestWithRealTikaServer(t *testing.T) {
 // 性能比较测试：Tika vs Eino
 func TestCompareExtractorPerformance(t *testing.T) {
 	// 加载配置
-	cfg, err := config.LoadConfigFromFileOnly("../../internal/config/config.yaml")
+	cfg, err := config.LoadConfigFromFileAndEnv("../../internal/config/config.yaml")
 	if err != nil {
 		t.Skip("无法加载配置文件，跳过性能对比测试")
 		return
@@ -605,7 +605,7 @@ func TestExtractTables(t *testing.T) {
 // 测试ExtractFromFile接口方法
 func TestExtractFromFile(t *testing.T) {
 	// 加载配置
-	cfg, err := config.LoadConfigFromFileOnly("../../internal/config/config.yaml")
+	cfg, err := config.LoadConfigFromFileAndEnv("../../internal/config/config.yaml")
 	if err != nil {
 		t.Skip("无法加载配置文件，跳过文件提取测试")
 		return
@@ -648,7 +648,7 @@ func TestExtractFromFile(t *testing.T) {
 // TestAnnotationExtraction 测试是否可以禁用PDF注释提取
 func TestAnnotationExtraction(t *testing.T) {
 	// 加载配置
-	cfg, err := config.LoadConfigFromFileOnly("../../internal/config/config.yaml")
+	cfg, err := config.LoadConfigFromFileAndEnv("../../internal/config/config.yaml")
 	if err != nil {
 		t.Logf("无法加载配置文件: %v，使用默认URL", err)
 		cfg = &config.Config{}

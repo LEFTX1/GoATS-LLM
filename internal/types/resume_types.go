@@ -32,6 +32,18 @@ const (
 	SectionFullText SectionType = "FULL_TEXT"
 )
 
+// AllowedVectorTypes 定义允许存储向量的章节类型
+// 这是一个全局白名单，用于统一过滤逻辑，避免多处不同的过滤规则导致的不一致性
+var AllowedVectorTypes = map[SectionType]bool{
+	SectionSkills:         true, // 核心类型：技能
+	SectionProjects:       true, // 核心类型：项目经历
+	SectionWorkExperience: true, // 核心类型：工作经历
+	"EXPERIENCE":          true, // 将EXPERIENCE也视为工作经验，增强容错性
+	SectionInternships:    true, // 实习经历也算作核心类型
+	// 移除教育经历，不再作为核心类型存入向量数据库
+	// SectionEducation:      true,
+}
+
 // ResumeSection 简历章节结构
 type ResumeSection struct {
 	Type             SectionType // 章节类型
@@ -74,7 +86,7 @@ type JobMatchEvaluation struct {
 	EvaluationID string `json:"evaluation_id,omitempty"`
 }
 
-// ResumeChunk 表示简历的一个分块
+// ResumeChunk 表示简历中的一个分块
 type ResumeChunk struct {
 	ChunkID           int           `json:"chunk_id"`
 	ChunkType         string        `json:"chunk_type"`
@@ -83,6 +95,8 @@ type ResumeChunk struct {
 	UniqueIdentifiers Identity      `json:"unique_identifiers"`
 	Metadata          ChunkMetadata `json:"metadata"`
 	ChunkTitle        string        `json:"chunk_title,omitempty"` // 可选标题，适用于有标题的分块
+	Type              SectionType   `json:"-"`                     // 内部使用，转换为ChunkType
+	Title             string        `json:"-"`                     // 内部使用，转换为ChunkTitle
 }
 
 // Identity 表示简历中的唯一标识信息
@@ -92,11 +106,32 @@ type Identity struct {
 	Email string `json:"email,omitempty"`
 }
 
-// ChunkMetadata 表示每个分块的元数据
-type ChunkMetadata struct {
-	ExperienceYears int    `json:"experience_years,omitempty"`
-	EducationLevel  string `json:"education_level,omitempty"`
+// ResumeMetadata 定义简历元数据字段，用于统一结构
+type ResumeMetadata struct {
+	// 学校相关信息
+	Is211            bool   `json:"is_211"`
+	Is985            bool   `json:"is_985"`
+	IsDoubleTop      bool   `json:"is_double_top"`
+	HighestEducation string `json:"highest_education"` // 本科/硕士/博士/专科
+
+	// 经验相关
+	YearsOfExperience float32 `json:"years_of_experience"`
+	HasInternExp      bool    `json:"has_intern_exp"`
+	HasWorkExp        bool    `json:"has_work_exp"`
+
+	// 奖项相关
+	HasAlgorithmAward              bool     `json:"has_algorithm_award"`
+	AlgorithmAwardTitles           []string `json:"algorithm_award_titles,omitempty"`
+	HasProgrammingCompetitionAward bool     `json:"has_programming_competition_award"`
+	ProgrammingCompetitionTitles   []string `json:"programming_competition_titles,omitempty"`
+
+	// 评分和标签
+	ResumeScore int      `json:"resume_score,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
 }
+
+// 更改ChunkMetadata结构为更灵活的map
+type ChunkMetadata map[string]interface{}
 
 // ResumeData 表示整个简历的结构化数据
 type ResumeData struct {
@@ -128,9 +163,16 @@ type PaginatedResumeResponse struct {
 
 // ResumeWithChunks 包含所有块的简历
 type ResumeWithChunks struct {
-	SubmissionUUID string            `json:"submission_uuid"`
-	BasicInfo      map[string]string `json:"basic_info"`
-	Chunks         []ResumeChunkData `json:"chunks"`
+	SubmissionUUID   string            `json:"submission_uuid"`
+	OriginalFilename string            `json:"original_filename"`
+	CandidateName    string            `json:"candidate_name"`
+	HighestEducation string            `json:"highest_education"`
+	YearsOfExp       float32           `json:"years_of_exp"`
+	Is211            bool              `json:"is_211"`
+	Is985            bool              `json:"is_985"`
+	IsDoubleTop      bool              `json:"is_double_top"`
+	BasicInfo        map[string]string `json:"basic_info"`
+	Chunks           []ResumeChunkData `json:"chunks"`
 }
 
 // ResumeChunkData 简历块数据

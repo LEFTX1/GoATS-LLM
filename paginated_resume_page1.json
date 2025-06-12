@@ -1,0 +1,415 @@
+{
+  "job_id": "job-pagination-test-002",
+  "cursor": 0,
+  "next_cursor": 10,
+  "size": 10,
+  "total_count": 119,
+  "resumes": [
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000001",
+      "original_filename": "孙悟空_Go架构师.pdf",
+      "candidate_name": "孙悟空",
+      "highest_education": "未知",
+      "years_of_exp": 10,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "sun.wukong.go@example.com",
+        "name": "孙悟空",
+        "phone": "13811110001",
+        "tags": "Go,架构师,Go-Zero,gRPC,微服务",
+        "years_of_experience": "10"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "孙悟空 | Go Architect | 13811110001"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "核心技能",
+          "content_text": "精通Go语言和并发模型。精通Go-Zero, Kratos等微服务框架。精通gRPC, Protobuf。熟悉服务治理，如服务发现、熔断、限流。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "社交App后端重构\n职责: 主导将PHP单体应用重构为Go微服务。使用Go-Zero框架，拆分出用户、关系、动态等三十余个微服务。通过gRPC进行内部通信，性能提升10倍。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197e5a2-d001-e001-f001-000000000014",
+      "original_filename": "马琳_DevOps.pdf",
+      "candidate_name": "马琳",
+      "highest_education": "未知",
+      "years_of_exp": 6,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "ma.lin.devops@example.com",
+        "name": "马琳",
+        "phone": "13520140014",
+        "tags": "DevOps,K8s,Docker,CI/CD,Go服务运维",
+        "years_of_experience": "6"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "马琳 | DevOps Engineer | 13520140014"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "EDUCATION",
+          "chunk_title": "教育经历",
+          "content_text": "北京邮电大学 | 通信工程 | 本科"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能列表",
+          "content_text": "精通K8s, Docker, Jenkins, Terraform。熟悉Prometheus监控。熟练编写Shell, Python自动化脚本。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "微服务平台运维\n职责: 负责公司Go微服务在K8s集群的部署、扩缩容和日常运维。为Go服务构建统一的CI/CD pipeline。使用Prometheus和Grafana监控Go服务的性能指标（如goroutine数量，GC延迟）。排查过多次Go服务的线上内存泄漏问题。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197e5a2-d001-e001-f001-000000000003",
+      "original_filename": "陈旭_IM专家.pdf",
+      "candidate_name": "陈旭",
+      "highest_education": "未知",
+      "years_of_exp": 7,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "chen.xu@example.com",
+        "name": "陈旭",
+        "phone": "13510030003",
+        "tags": "Go,高并发,IM,WebSocket,性能调优",
+        "years_of_experience": "7"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "陈旭 | Senior Go Engineer | 13510030003"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "专业技能",
+          "content_text": "精通Go，熟悉net/http, TCP, WebSocket编程。精通PProf等性能分析工具。熟悉gRPC框架。使用K8s进行容器编排。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "直播弹幕系统 (核心开发)\n技术: Go, WebSocket, gRPC, K8s, Redis Cluster。\n职责: 负责弹幕系统的长连接网关开发和性能优化。通过优化内存分配和协程池，实现单机百万长连接。后台服务间通过gRPC通信，保证低延迟。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000002",
+      "original_filename": "猪八戒_Go高并发.pdf",
+      "candidate_name": "猪八戒",
+      "highest_education": "未知",
+      "years_of_exp": 8,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "zhu.bajie.go@example.com",
+        "name": "猪八戒",
+        "phone": "13911110002",
+        "tags": "Go,高并发,电商,秒杀,Redis",
+        "years_of_experience": "8"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "猪八戒 | Senior Go Engineer | 13911110002"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。精通Gin框架。精通Redis，熟悉分布式锁和Lua脚本。熟悉Kafka进行异步削峰。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "电商秒杀系统\n职责: 核心开发者。使用Go和Gin开发秒杀接口。通过Redis预减库存和分布式锁防止超卖。将下单请求发送到Kafka，由下游服务异步处理，保证了秒杀接口的高可用和低延迟。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197e5a2-d001-e001-f001-000000000005",
+      "original_filename": "宋佳_分布式存储.pdf",
+      "candidate_name": "宋佳",
+      "highest_education": "未知",
+      "years_of_exp": 6,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "song.jia@example.com",
+        "name": "宋佳",
+        "phone": "13820050005",
+        "tags": "Go,分布式存储,Raft,ETCD,gRPC",
+        "years_of_experience": "6"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "宋佳 | Distributed System Engineer | 13820050005"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉分布式系统理论，对Raft共识算法有代码级理解。熟悉gRPC。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "自研分布式对象存储 (核心开发)\n技术: Go, gRPC, Raft, RocksDB。\n职责: 负责元数据管理模块的设计和实现。使用Raft协议保证元数据节点的高可用和一致性。数据分片存储，并实现了多副本策略。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000009",
+      "original_filename": "金角大王_工具链.pdf",
+      "candidate_name": "金角大王",
+      "highest_education": "未知",
+      "years_of_exp": 8,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "jinjiao.go@example.com",
+        "name": "金角大王",
+        "phone": "13711110009",
+        "tags": "Go,代码生成,工具链,Protobuf,研发效能",
+        "years_of_experience": "8"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "金角大王 | Go Tooling Engineer | 13711110009"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉Protobuf和gRPC-Gateway。熟悉Go的AST（抽象语法树）和代码生成。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "项目快速生成脚手架\n职责: 开发公司内部的CLI工具，基于Protobuf定义，能一键生成微服务的项目骨架、CRUD代码、API文档和Dockerfile。使新服务的创建时间从一天缩短到5分钟。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000022",
+      "original_filename": "精卫_TSDB.pdf",
+      "candidate_name": "精卫",
+      "highest_education": "未知",
+      "years_of_exp": 6,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "jing.wei.go@example.com",
+        "name": "精卫",
+        "phone": "18611110022",
+        "tags": "Go,TSDB,时序数据库,Prometheus,监控",
+        "years_of_experience": "6"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "精卫 | TSDB Engineer | 18611110022"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉TSDB的存储模型和压缩算法，如Gorilla。熟悉PromQL。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "自研监控系统后端\n职责: 负责监控系统的数据存储层。使用Go语言实现了一个兼容Prometheus远程读写协议的TSDB。通过优化的时间序列压缩算法，将存储成本降低了40%。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197e5a2-d001-e001-f001-000000000009",
+      "original_filename": "赵强_后端开发.pdf",
+      "candidate_name": "赵强",
+      "highest_education": "未知",
+      "years_of_exp": 5,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "zhao.qiang@example.com",
+        "name": "赵强",
+        "phone": "13920090009",
+        "tags": "Python,Go,后端,Gin",
+        "years_of_experience": "5"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "赵强 | Backend Developer | 13920090009"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Python, Django, FastAPI。熟悉Go语言，使用Gin框架开发过服务。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "广告数据上报服务\n职责: 原服务使用Python编写，在高并发下性能不佳。我负责使用Go和Gin框架对其进行重构，重构后接口性能提升5倍，资源占用减少70%。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000007",
+      "original_filename": "红孩儿_消息系统.pdf",
+      "candidate_name": "红孩儿",
+      "highest_education": "未知",
+      "years_of_exp": 6,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "hong.haier.go@example.com",
+        "name": "红孩儿",
+        "phone": "13511110007",
+        "tags": "Go,消息系统,Kafka,事件驱动,异步",
+        "years_of_experience": "6"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "红孩儿 | Go Messaging Engineer | 13511110007"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉Kafka客户端和消费者组。熟悉NSQ。了解事件溯源（Event Sourcing）模式。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "事件中心平台\n职责: 负责构建公司统一的事件总线。使用Go编写高吞吐量的Kafka消费者，将不同业务线的事件进行清洗、路由，并分发给下游系统。保证了消息的Exactly-once处理。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197e5a2-d001-e001-f001-000000000004",
+      "original_filename": "周毅_Go_Framework.pdf",
+      "candidate_name": "周毅",
+      "highest_education": "未知",
+      "years_of_exp": 8,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "zhou.yi@example.com",
+        "name": "周毅",
+        "phone": "18610040004",
+        "tags": "Go,微服务框架,基础架构,gRPC,代码生成",
+        "years_of_experience": "8"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "周毅 | Principal Go Engineer | 18610040004"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能专长",
+          "content_text": "精通Go语言，对元编程、AST有研究。精通微服务治理，如服务发现、负载均衡、熔断限流。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "自研Go微服务框架 \"Orion\"\n职责: 作为项目发起人和核心开发者，设计并实现了类似Go-Zero的微服务框架。通过Protobuf和CLI工具，实现API定义、gRPC和HTTP代码一键生成。内置了服务注册与发现（etcd）、链路追踪（OpenTelemetry）、日志、配置等标准中间件。该框架已在公司内部数十个服务中应用。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    }
+  ]
+}

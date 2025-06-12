@@ -35,7 +35,7 @@ func loadAliyunTestConfig(t *testing.T) *config.Config {
 
 	t.Logf("尝试从以下路径加载配置: %s", configPath)
 
-	cfg, err := config.LoadConfigFromFileOnly(configPath)
+	cfg, err := config.LoadConfigFromFileAndEnv(configPath)
 	if err != nil {
 		t.Logf("加载配置失败: %v，使用默认测试配置", err)
 		// 如果找不到配置文件，创建测试用的默认配置
@@ -58,7 +58,7 @@ func createDefaultTestConfig() *config.Config {
 		}{
 			APIKey: "test_api_key",
 			Embedding: config.EmbeddingConfig{
-				Model:      "text-embedding-v3",
+				Model:      "text-embedding-v4",
 				Dimensions: 1536,
 				BaseURL:    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
 			},
@@ -124,7 +124,7 @@ func TestAliyunEmbedder_EmbedStrings_EmptyInput(t *testing.T) {
 	// If embeddingCfg is empty (e.g. from a minimal default test config where Aliyun.Embedding might not be fully populated by createDefaultConfig initially)
 	// provide minimal valid defaults for the test to proceed with the dummy key.
 	if embeddingCfg.Model == "" {
-		embeddingCfg.Model = "text-embedding-v3"
+		embeddingCfg.Model = "text-embedding-v4"
 	}
 	if embeddingCfg.BaseURL == "" {
 		embeddingCfg.BaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"

@@ -427,12 +427,22 @@ func (m *MySQL) SaveResumeChunks(tx *gorm.DB, submissionUUID string, sections []
 	if len(sections) == 0 {
 		return nil
 	}
-	// 安全检查: 确保 pointIDs 长度与 sections 一致 (如果提供了 pointIDs)
-	if len(pointIDs) > 0 && len(sections) != len(pointIDs) {
-		return fmt.Errorf("sections and pointIDs length mismatch: %d != %d", len(sections), len(pointIDs))
+
+	// 创建分块记录数组
+	chunks := make([]models.ResumeSubmissionChunk, len(sections))
+
+	// 创建section.ChunkID到pointIDs索引的映射表
+	pointIDMap := make(map[int]string)
+	if len(pointIDs) > 0 {
+		for i, section := range sections {
+			if i < len(pointIDs) && types.AllowedVectorTypes[section.Type] {
+				// 只有在AllowedVectorTypes白名单中的分块才会有对应的pointID
+				pointIDMap[section.ChunkID] = pointIDs[i]
+			}
+		}
 	}
 
-	chunks := make([]models.ResumeSubmissionChunk, len(sections))
+	// 将所有分块添加到MySQL，不管是否有pointID
 	for i, section := range sections {
 		chunk := models.ResumeSubmissionChunk{
 			SubmissionUUID:      submissionUUID,
@@ -441,14 +451,15 @@ func (m *MySQL) SaveResumeChunks(tx *gorm.DB, submissionUUID string, sections []
 			ChunkTitle:          section.Title,
 			ChunkContentText:    section.Content,
 		}
-		// 如果提供了PointID并且长度匹配，则赋值
-		if len(pointIDs) > 0 {
-			if pointIDs[i] != "" {
-				chunk.PointID = &pointIDs[i]
-			}
+
+		// 如果该分块有对应的pointID，则添加到记录中
+		if pointID, exists := pointIDMap[section.ChunkID]; exists && pointID != "" {
+			chunk.PointID = &pointID
 		}
+
 		chunks[i] = chunk
 	}
+
 	return tx.Create(&chunks).Error
 }
 

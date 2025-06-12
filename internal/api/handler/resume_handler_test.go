@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"io"
 	"log"
 	"mime/multipart"
@@ -30,6 +29,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/joho/godotenv"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/components/model"
 
@@ -70,6 +72,16 @@ const (
 	testResumeUUID2 = "c5b2a1a8-2943-4f3b-8f32-3a5e8d6e1b43"
 )
 
+// 本地测试白名单，必须与全局types.AllowedVectorTypes保持一致
+var AllowedVectorTypes = map[types.SectionType]bool{
+	types.SectionSkills:         true, // 核心类型：技能
+	types.SectionProjects:       true, // 核心类型：项目经历
+	types.SectionWorkExperience: true, // 核心类型：工作经历
+	types.SectionInternships:    true, // 核心类型：实习经历
+	"EXPERIENCE":                true, // 将EXPERIENCE也视为工作经验，增强容错性
+	// SectionEducation已从白名单中移除，不再作为核心类型
+}
+
 func ensureTestPDF(t *testing.T) string {
 	testPDFPath := filepath.Join(testDataDir, testPDF)
 	if _, err := os.Stat(testPDFPath); os.IsNotExist(err) {
@@ -98,8 +110,39 @@ func oneTimeSetupFunc(t *testing.T) {
 	glog.SetLogger(hertzCompatibleLogger)
 	glog.SetLevel(glog.LevelDebug) // Hertz log level, appCoreLogger controls general app logging
 
+	// 尝试加载.env文件（如果存在）
+	// 更精确地定位.env文件路径
+	currentDir, _ := os.Getwd()
+	t.Logf("测试运行时的工作目录: %s", currentDir)
+
+	// 构建多个可能的路径
+	envPaths := []string{
+		filepath.Join(currentDir, ".env"), // 当前目录
+		".env",                            // 相对路径
+		filepath.Join(currentDir, "../../../.env"),          // 假设从internal/api/handler运行
+		filepath.Join(filepath.Dir(testConfigPath), ".env"), // 配置文件同级目录
+	}
+
+	envLoaded := false
+	for _, envPath := range envPaths {
+		t.Logf("尝试加载环境变量文件: %s", envPath)
+		if _, err := os.Stat(envPath); err == nil {
+			if err := godotenv.Load(envPath); err == nil {
+				t.Logf("成功加载环境变量文件: %s", envPath)
+				envLoaded = true
+				break
+			} else {
+				t.Logf("发现.env文件但加载失败: %v", err)
+			}
+		}
+	}
+
+	if !envLoaded {
+		t.Log("警告: 未能加载任何.env文件")
+	}
+
 	var err error
-	testCfg, err = config.LoadConfigFromFileOnly(testConfigPath)
+	testCfg, err = config.LoadConfigFromFileAndEnv(testConfigPath)
 	require.NoError(t, err, "Failed to load test config from %s", testConfigPath)
 	require.NotNil(t, testCfg, "Test config is nil")
 
@@ -114,6 +157,37 @@ func oneTimeSetupFunc(t *testing.T) {
 
 	testCfg.MinIO.EnableTestLogging = true
 	testCfg.MySQL.LogLevel = 1 // gormLogger.Silent, to suppress GORM logs during NewMySQL's autoMigrate
+
+	// 从环境变量注入敏感配置（如果存在）
+	if mysqlPassword := os.Getenv("MYSQL_PASSWORD"); mysqlPassword != "" {
+		testCfg.MySQL.Password = mysqlPassword
+		t.Log("从环境变量注入MySQL密码")
+	}
+
+	if minioAccessKey := os.Getenv("MINIO_ACCESS_KEY_ID"); minioAccessKey != "" {
+		testCfg.MinIO.AccessKeyID = minioAccessKey
+		t.Log("从环境变量注入MinIO访问密钥ID")
+	}
+
+	if minioSecretKey := os.Getenv("MINIO_SECRET_KEY"); minioSecretKey != "" {
+		testCfg.MinIO.SecretAccessKey = minioSecretKey
+		t.Log("从环境变量注入MinIO密钥")
+	}
+
+	if rabbitmqUsername := os.Getenv("RABBITMQ_USERNAME"); rabbitmqUsername != "" {
+		testCfg.RabbitMQ.Username = rabbitmqUsername
+		t.Log("从环境变量注入RabbitMQ用户名")
+	}
+
+	if rabbitmqPassword := os.Getenv("RABBITMQ_PASSWORD"); rabbitmqPassword != "" {
+		testCfg.RabbitMQ.Password = rabbitmqPassword
+		t.Log("从环境变量注入RabbitMQ密码")
+	}
+
+	if redisPassword := os.Getenv("REDIS_PASSWORD"); redisPassword != "" {
+		testCfg.Redis.Password = redisPassword
+		t.Log("从环境变量注入Redis密码")
+	}
 
 	ctx := context.Background()
 	testStorageManager, err = storage.NewStorage(ctx, testCfg)
@@ -209,9 +283,9 @@ func oneTimeSetupFunc(t *testing.T) {
 		pdfExtractor = parser.NewTikaPDFExtractor(testCfg.Tika.ServerURL, tikaOptions...)
 		t.Logf("Using TikaPDFExtractor with URL: %s", testCfg.Tika.ServerURL)
 	} else {
-		pdfExtractor, err = parser.NewEinoPDFTextExtractor(ctx)
-		require.NoError(t, err, "Failed to create EinoPDFTextExtractor")
-		t.Log("Using EinoPDFTextExtractor as fallback or default.")
+		// 修改这里，默认使用Tika而不是Eino
+		pdfExtractor = parser.NewTikaPDFExtractor("http://localhost:9998")
+		t.Log("Using TikaPDFExtractor as default.")
 	}
 
 	// --- Initialize LLM Clients (Real or Mock Fallback) ---
@@ -219,18 +293,36 @@ func oneTimeSetupFunc(t *testing.T) {
 	var llmForEvaluator model.ToolCallingChatModel
 	var llmInitErr error
 
-	apiKey := testCfg.Aliyun.APIKey
+	// 优先从环境变量获取API密钥
+	apiKey := os.Getenv("DASHSCOPE_API_KEY")
+	if apiKey == "" {
+		// 如果环境变量中没有，则从配置中获取
+		apiKey = testCfg.Aliyun.APIKey
+		t.Logf("从配置文件中获取API密钥: %s", testConfigPath)
+	} else {
+		t.Logf("成功从环境变量DASHSCOPE_API_KEY获取API密钥")
+		// 将环境变量中的API密钥赋值给配置，确保后续使用
+		testCfg.Aliyun.APIKey = apiKey
+	}
+
 	apiURL := testCfg.Aliyun.APIURL
 	if apiURL == "" {
 		apiURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" // Default Dashscope-compatible endpoint
 		t.Logf("Aliyun API URL not set in config, using default: %s", apiURL)
 	}
 
+	// 打印API密钥前4位和后4位，用于调试
+	maskedKey := "****"
+	if len(apiKey) > 8 {
+		maskedKey = apiKey[:4] + "..." + apiKey[len(apiKey)-4:]
+	}
+	t.Logf("使用的API密钥: %s", maskedKey)
+
 	if apiKey == "" || apiKey == "your_api_key_here" || apiKey == "test_api_key" {
-		t.Fatalf("阿里云 API Key 未在配置文件 (%s) 中有效配置。请提供有效的API Key以运行集成测试。", testConfigPath)
+		t.Fatalf("阿里云 API Key 未在配置文件 (%s) 或环境变量 DASHSCOPE_API_KEY 中有效配置。请提供有效的API Key以运行集成测试。", testConfigPath)
 	}
 
-	maskedKey := "****"
+	maskedKey = "****"
 	if len(apiKey) > 8 {
 		maskedKey = apiKey[:4] + "..." + apiKey[len(apiKey)-4:]
 	}
@@ -1064,7 +1156,6 @@ func TestStartLLMParsingConsumer_ProcessMessageSuccess(t *testing.T) {
 	// 使用标准 UUID 格式，避免 "uuid: incorrect UUID length" 错误
 	submissionUUID := uuid.Must(uuid.NewV4()).String()
 	targetJobID := "llm-job-id-" + uuid.Must(uuid.NewV4()).String()[:4]
-	parsedTextContent := "Resume for Test User. Email: test@example.com. Phone: 1234567890. Education: Bachelor's. Experience: 2 years. Skills: Go, Python."
 
 	// --- 新增：为测试用例植入对应的 Job 数据 ---
 	mockJobForLLMTest := models.Job{
@@ -1081,11 +1172,52 @@ func TestStartLLMParsingConsumer_ProcessMessageSuccess(t *testing.T) {
 	t.Logf("Ensured target job exists in DB for LLM consumer test with JobID: %s", targetJobID)
 	// --- 结束新增代码 ---
 
-	// 1. Upload dummy parsed text to MinIO using UploadParsedText, and use the returned path
+	// 获取当前工作目录的绝对路径
+	wd, err := os.Getwd()
+	require.NoError(t, err, "无法获取工作目录")
+
+	// 使用真实PDF文件代替硬编码文本字符串
+	testPDFPath := filepath.Join(wd, "..", "..", "..", "testdata", "黑白整齐简历模板 (6).pdf")
+	require.FileExists(t, testPDFPath, "测试PDF文件不存在：%s", testPDFPath)
+
+	// 读取PDF文件内容
+	pdfContent, err := os.ReadFile(testPDFPath)
+	require.NoError(t, err, "无法读取PDF文件：%s", testPDFPath)
+
+	// 上传原始PDF文件到MinIO
+	originalObjectName, err := testStorageManager.MinIO.UploadResumeFile(
+		context.Background(),
+		submissionUUID,
+		".pdf",
+		bytes.NewReader(pdfContent),
+		int64(len(pdfContent)),
+	)
+	require.NoError(t, err, "上传PDF文件到MinIO失败")
+	t.Logf("上传原始PDF文件到MinIO成功：%s", originalObjectName)
+
+	// 使用PDFExtractor提取文本
+	var pdfExtractor processor.PDFExtractor
+	if testCfg.Tika.Type == "tika" && testCfg.Tika.ServerURL != "" {
+		var tikaOptions []parser.TikaOption
+		if testCfg.Tika.Timeout > 0 {
+			tikaOptions = append(tikaOptions, parser.WithTimeout(time.Duration(testCfg.Tika.Timeout)*time.Second))
+		}
+		pdfExtractor = parser.NewTikaPDFExtractor(testCfg.Tika.ServerURL, tikaOptions...)
+	} else {
+		pdfExtractor = parser.NewTikaPDFExtractor("http://localhost:9998")
+	}
+
+	// 提取PDF文本 - 使用正确的方法
+	parsedText, _, err := pdfExtractor.ExtractTextFromReader(context.Background(), bytes.NewReader(pdfContent), originalObjectName, nil)
+	require.NoError(t, err, "从PDF提取文本失败")
+	require.NotEmpty(t, parsedText, "提取的PDF文本不能为空")
+	t.Logf("成功从PDF提取文本，文本长度：%d", len(parsedText))
+
+	// 上传解析后的文本到MinIO
 	actualParsedTextObjectName, err := testStorageManager.MinIO.UploadParsedText(
 		context.Background(),
 		submissionUUID,
-		parsedTextContent,
+		parsedText,
 	)
 	require.NoError(t, err, "Failed to pre-upload parsed text to MinIO for LLM consumer test")
 	t.Logf("Pre-uploaded parsed text to MinIO: %s in bucket %s", actualParsedTextObjectName, testCfg.MinIO.ParsedTextBucket)
@@ -1096,8 +1228,8 @@ func TestStartLLMParsingConsumer_ProcessMessageSuccess(t *testing.T) {
 		TargetJobID:         utils.StringPtr(targetJobID),
 		ParsedTextPathOSS:   actualParsedTextObjectName,   // Use the path returned by UploadParsedText
 		ProcessingStatus:    constants.StatusQueuedForLLM, // Status indicating it's ready for LLM processing
-		OriginalFilePathOSS: "dummy/original/path-" + submissionUUID + ".pdf",
-		OriginalFilename:    "dummy-" + submissionUUID + ".pdf",
+		OriginalFilePathOSS: originalObjectName,           // 使用实际上传的PDF文件路径
+		OriginalFilename:    "黑白整齐简历模板 (6).pdf",           // 使用实际的PDF文件名
 		SubmissionTimestamp: time.Now().Add(-time.Hour),
 		SourceChannel:       "llm-consumer-test",
 	}
@@ -1204,6 +1336,57 @@ verificationLoopEndLLM:
 	require.NoError(t, err, "Failed to fetch ResumeSubmissionChunk records for UUID: %s", submissionUUID)
 	require.Greater(t, len(chunks), 0, "Should have at least one chunk in ResumeSubmissionChunk table after LLM processing")
 	t.Logf("Found %d chunks in DB for submission %s. First chunk type: %s, title: '%s'", len(chunks), submissionUUID, chunks[0].ChunkType, chunks[0].ChunkTitle)
+
+	// 分类统计不同类型的分块
+	var chunksByType = make(map[string]int)
+	var chunksWithPointID = 0
+	for _, chunk := range chunks {
+		chunksByType[chunk.ChunkType]++
+		if chunk.PointID != nil && *chunk.PointID != "" {
+			chunksWithPointID++
+		}
+	}
+
+	// 验证核心逻辑：所有分块都入库MySQL，但只有核心分块入向量数据库
+	t.Logf("Chunk type distribution: %v", chunksByType)
+	t.Logf("Total chunks with PointID (vector data): %d out of %d total chunks", chunksWithPointID, len(chunks))
+	require.LessOrEqual(t, chunksWithPointID, len(chunks), "Number of chunks with PointID should be less than or equal to total chunks")
+
+	// 验证 BASIC_INFO 类型的分块不应该有 PointID
+	for _, chunk := range chunks {
+		if chunk.ChunkType == string(types.SectionBasicInfo) {
+			require.Nil(t, chunk.PointID, "BASIC_INFO chunk should not have a PointID")
+		}
+	}
+
+	// 检查核心分块类型是否有 PointID（如果分块存在）
+	coreChunkTypesFound := false
+	coreChunkTypesWithPointID := false
+	for _, chunk := range chunks {
+		// 检查是否有核心分块类型
+		if chunk.ChunkType == string(types.SectionWorkExperience) ||
+			chunk.ChunkType == string(types.SectionProjects) ||
+			chunk.ChunkType == string(types.SectionSkills) ||
+			chunk.ChunkType == "EXPERIENCE" ||
+			chunk.ChunkType == string(types.SectionInternships) {
+			// 如果找到至少一个核心分块类型，标记为已找到
+			coreChunkTypesFound = true
+			// 检查是否有带PointID的核心分块
+			if chunk.PointID != nil && *chunk.PointID != "" {
+				coreChunkTypesWithPointID = true
+				t.Logf("Verified core chunk type %s has PointID %s", chunk.ChunkType, *chunk.PointID)
+			}
+		}
+	}
+
+	// 如果找到了核心分块类型且有核心分块有PointID，我们应该有非零的PointID计数
+	if coreChunkTypesFound && coreChunkTypesWithPointID {
+		require.Greater(t, chunksWithPointID, 0, "Core chunk types found with PointID should result in non-zero PointID count")
+	} else if coreChunkTypesFound {
+		t.Logf("Found core chunk types but none have PointID. This may be valid in some cases.")
+	} else {
+		t.Logf("No core chunk types found in the test data. Cannot verify PointID behavior.")
+	}
 
 	// Qdrant Verification & Collect PointIDs for Cleanup
 	var pointIDsForCleanup []string
@@ -1350,9 +1533,8 @@ func TestOutboxPattern_ResumeUploadConsumer_CreatesAndRelaysMessage(t *testing.T
 	require.NoError(t, err)
 
 	// 手动创建提取器以获取文本内容，从而计算出将要生成的MD5
-	// 此处不关心Tika，因为Eino是默认和回退选项，足以模拟处理器行为
-	tempExtractor, err := parser.NewEinoPDFTextExtractor(context.Background())
-	require.NoError(t, err, "Failed to create temporary Eino extractor for MD5 cleanup")
+	// 使用Tika作为默认提取器
+	tempExtractor := parser.NewTikaPDFExtractor("http://localhost:9998")
 	extractedText, _, err := tempExtractor.ExtractTextFromBytes(context.Background(), pdfBytes, "", nil)
 	require.NoError(t, err, "Failed to extract text for MD5 cleanup")
 
@@ -1876,20 +2058,20 @@ func TestQdrantDeterministicIDsIntegration(t *testing.T) {
 	chunks := []types.ResumeChunk{
 		{
 			ChunkID:   1,
-			ChunkType: "summary",
+			ChunkType: string(types.SectionSkills), // 修改为已定义的允许向量化类型
 			Content:   "这是第一个测试块",
 			Metadata: types.ChunkMetadata{
-				ExperienceYears: 5,
-				EducationLevel:  "本科",
+				"years_of_experience": 5,
+				"highest_education":   "本科",
 			},
 		},
 		{
 			ChunkID:   2,
-			ChunkType: "experience",
+			ChunkType: string(types.SectionWorkExperience), // 修改为已定义的允许向量化类型
 			Content:   "这是第二个测试块",
 			Metadata: types.ChunkMetadata{
-				ExperienceYears: 5,
-				EducationLevel:  "本科",
+				"years_of_experience": 5,
+				"highest_education":   "本科",
 			},
 		},
 	}

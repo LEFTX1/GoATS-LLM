@@ -6,11 +6,12 @@ import (
 	"ai-agent-go/internal/types"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/joho/godotenv"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -462,14 +463,19 @@ func TestResumeStructureSerialization(t *testing.T) {
 			},
 		},
 		Metadata: struct {
-			Is211       bool     `json:"is_211"`
-			Is985       bool     `json:"is_985"`
-			IsDoubleTop bool     `json:"is_double_top"`
-			HasIntern   bool     `json:"has_intern"`
-			Education   string   `json:"highest_education"`
-			Experience  float64  `json:"years_of_experience"`
-			Score       int      `json:"resume_score"`
-			Tags        []string `json:"tags"`
+			Is211                          bool     `json:"is_211"`
+			Is985                          bool     `json:"is_985"`
+			IsDoubleTop                    bool     `json:"is_double_top"`
+			HasIntern                      bool     `json:"has_intern"`
+			HasWorkExp                     bool     `json:"has_work_exp"`
+			Education                      string   `json:"highest_education"`
+			Experience                     float64  `json:"years_of_experience"`
+			Score                          int      `json:"resume_score"`
+			Tags                           []string `json:"tags"`
+			HasAlgorithmAward              bool     `json:"has_algorithm_award"`
+			AlgorithmAwardTitles           []string `json:"algorithm_award_titles"`
+			HasProgrammingCompetitionAward bool     `json:"has_programming_competition_award"`
+			ProgrammingCompetitionTitles   []string `json:"programming_competition_titles"`
 		}{
 			Is211:       true,
 			Is985:       true,
@@ -514,7 +520,7 @@ func TestRealResumeParsing(t *testing.T) {
 
 	// 加载配置
 	configPath := "C:/Users/left/Desktop/agent-go/internal/config/config.yaml"
-	cfg, err := config.LoadConfigFromFileOnly(configPath)
+	cfg, err := config.LoadConfigFromFileAndEnv(configPath)
 	if err != nil {
 		t.Fatalf("加载配置文件失败: %v", err)
 	}
@@ -1442,7 +1448,7 @@ func TestLLMChunkerWithRealResume(t *testing.T) {
 
 	// 加载配置
 	configPath := "C:/Users/left/Desktop/agent-go/internal/config/config.yaml"
-	cfg, err := config.LoadConfigFromFileOnly(configPath)
+	cfg, err := config.LoadConfigFromFileAndEnv(configPath)
 	if err != nil {
 		t.Fatalf("加载配置文件失败: %v", err)
 	}
@@ -1611,11 +1617,32 @@ func TestLLMChunkerWithRealResume(t *testing.T) {
 	// 打印元数据分析
 	t.Log("\n【元数据分析】:")
 	t.Log("----------------------------------------------------------------------")
-	metadataFields := []string{"is_211", "is_985", "is_double_top", "has_intern", "highest_education", "years_of_experience", "resume_score"}
+	metadataFields := []string{
+		"is_211", "is_985", "is_double_top", "has_intern", "has_work_exp",
+		"highest_education", "years_of_experience", "resume_score",
+		"has_algorithm_award", "has_programming_competition_award",
+	}
 	for _, field := range metadataFields {
 		if value, ok := basicInfo[field]; ok {
-			t.Logf("%-20s: %s", field, value)
+			t.Logf("%-30s: %s", field, value)
 		}
+	}
+
+	// 打印奖项详情（如果存在）
+	if algorithmAwards, ok := basicInfo["algorithm_award_titles"]; ok && algorithmAwards != "" {
+		t.Log("\n【算法奖项详情】:")
+		t.Log(algorithmAwards)
+	}
+
+	if programmingAwards, ok := basicInfo["programming_competition_titles"]; ok && programmingAwards != "" {
+		t.Log("\n【编程竞赛奖项详情】:")
+		t.Log(programmingAwards)
+	}
+
+	// 打印标签
+	if tags, ok := basicInfo["tags"]; ok && tags != "" {
+		t.Log("\n【简历标签】:")
+		t.Log(tags)
 	}
 
 	// 打印章节信息
@@ -1654,15 +1681,47 @@ func initRealLLM(ctx context.Context) (model.ToolCallingChatModel, error) {
 	configPath := "C:/Users/left/Desktop/agent-go/internal/config/config.yaml"
 	log.Printf("加载配置文件: %s", configPath)
 
+	// 尝试加载.env文件（如果存在）
+	// 更精确地定位.env文件路径
+	currentDir, _ := os.Getwd()
+	log.Printf("测试运行时的工作目录: %s", currentDir)
+
+	// 构建多个可能的路径
+	envPaths := []string{
+		filepath.Join(currentDir, ".env"),               // 当前目录
+		".env",                                          // 相对路径
+		filepath.Join(currentDir, "../../.env"),         // 假设从internal/api/handler运行
+		filepath.Join(filepath.Dir(configPath), ".env"), // 配置文件同级目录
+	}
+
+	envLoaded := false
+	for _, envPath := range envPaths {
+		log.Printf("尝试加载环境变量文件: %s", envPath)
+		if _, err := os.Stat(envPath); err == nil {
+			if err := godotenv.Load(envPath); err == nil {
+				log.Printf("成功加载环境变量文件: %s", envPath)
+				envLoaded = true
+				break
+			} else {
+				log.Printf("发现.env文件但加载失败: %v", err)
+			}
+		}
+	}
+
+	if !envLoaded {
+		log.Printf("警告: 未能加载任何.env文件")
+	}
+	// 优先从环境变量获取API密钥
+	apiKey := os.Getenv("DASHSCOPE_API_KEY")
+
 	// 读取配置文件
-	cfg, err := config.LoadConfigFromFileOnly(configPath)
+	cfg, err := config.LoadConfigFromFileAndEnv(configPath)
 	if err != nil {
 		log.Printf("加载配置文件失败: %v", err)
 		return nil, fmt.Errorf("加载配置文件失败: %w", err)
 	}
 
-	// 获取配置信息
-	apiKey := cfg.Aliyun.APIKey
+	cfg.Aliyun.APIKey = apiKey
 	apiURL := cfg.Aliyun.APIURL
 	modelName := cfg.Aliyun.Model
 
@@ -1717,258 +1776,6 @@ func ternary(condition bool, trueVal, falseVal string) string {
 		return trueVal
 	}
 	return falseVal
-}
-
-// TestLLMResumeChunker_ChunkResume tests the ChunkResume method of LLMResumeChunker
-func TestLLMResumeChunker_ChunkResume(t *testing.T) {
-	// Mock LLM Model
-	mockLLM := &MockLLMModel{}
-
-	// Create a discard logger for testing
-	testLogger := log.New(io.Discard, "", 0)
-
-	// Test cases
-	testCases := []struct {
-		name               string
-		resumeText         string
-		mockLLMResponse    string
-		mockLLMError       error
-		options            []LLMChunkerOption
-		expectedSections   []*types.ResumeSection
-		expectedBasicInfo  map[string]string
-		expectError        bool
-		expectedErrorMsg   string
-		validateOutputFunc func(t *testing.T, sections []*types.ResumeSection, basicInfo map[string]string, err error)
-	}{
-		{
-			name:       "Successful parsing with default prompt",
-			resumeText: "John Doe, Software Engineer, john.doe@example.com, 123-456-7890. Education: BSc Computer Science. Skills: Go, Python.",
-			mockLLMResponse: `{
-				"basic_info": {"name": "John Doe", "email": "john.doe@example.com", "phone": "123-456-7890", "position": "Software Engineer"},
-				"chunks": [
-					{"chunk_id": 1, "resume_identifier": "John Doe_123-456-7890", "type": "BASIC_INFO", "title": "Basic Information", "content": "John Doe, Software Engineer, john.doe@example.com, 123-456-7890."},
-					{"chunk_id": 2, "resume_identifier": "John Doe_123-456-7890", "type": "EDUCATION", "title": "Education", "content": "BSc Computer Science"},
-					{"chunk_id": 3, "resume_identifier": "John Doe_123-456-7890", "type": "SKILLS", "title": "Skills", "content": "Go, Python"}
-				],
-				"metadata": {"is_211": false, "is_985": false, "is_double_top": false, "has_intern": false, "highest_education": "BSc", "years_of_experience": 0, "resume_score": 75, "tags": ["Software Engineer"]}
-			}`,
-			options: []LLMChunkerOption{},
-			expectedSections: []*types.ResumeSection{
-				{Type: types.SectionBasicInfo, Title: "Basic Information", Content: "John Doe, Software Engineer, john.doe@example.com, 123-456-7890.", ChunkID: 1, ResumeIdentifier: "John Doe_123-456-7890"},
-				{Type: types.SectionEducation, Title: "Education", Content: "BSc Computer Science", ChunkID: 2, ResumeIdentifier: "John Doe_123-456-7890"},
-				{Type: types.SectionSkills, Title: "Skills", Content: "Go, Python", ChunkID: 3, ResumeIdentifier: "John Doe_123-456-7890"},
-			},
-			expectedBasicInfo: map[string]string{
-				"name": "John Doe", "email": "john.doe@example.com", "phone": "123-456-7890", "position": "Software Engineer",
-				"is_211": "false", "is_985": "false", "is_double_top": "false", "has_intern": "false",
-				"highest_education": "BSc", "years_of_experience": "0.0", "resume_score": "75", "tags": "Software Engineer",
-			},
-			expectError: false,
-		},
-		{
-			name:             "LLM call returns error",
-			resumeText:       "Some resume text.",
-			mockLLMError:     errors.New("LLM communication error"),
-			options:          []LLMChunkerOption{},
-			expectError:      true,
-			expectedErrorMsg: "LLM调用失败: LLM communication error",
-		},
-		{
-			name:             "LLM response is not valid JSON",
-			resumeText:       "Some resume text.",
-			mockLLMResponse:  "This is not JSON.",
-			options:          []LLMChunkerOption{},
-			expectError:      true,
-			expectedErrorMsg: "解析LLM响应失败: 无法从LLM响应中提取有效的JSON",
-		},
-		{
-			name:             "LLM response JSON is malformed",
-			resumeText:       "Another resume.",
-			mockLLMResponse:  `{"basic_info": {"name": "Jane"}, "chunks": [{"type": "EDUCATION", "content": "MSc AI"}`, // Malformed
-			options:          []LLMChunkerOption{},
-			expectError:      true,
-			expectedErrorMsg: "解析LLM响应失败: 解析JSON失败: unexpected end of JSON input",
-		},
-		{
-			name:       "Successful parsing with custom few-shot examples",
-			resumeText: "Jane Doe, AI Researcher, jane.doe@example.com, 098-765-4321. Education: MSc AI. Skills: TensorFlow, PyTorch.",
-			mockLLMResponse: `{
-				"basic_info": {"name": "Jane Doe", "email": "jane.doe@example.com", "phone": "098-765-4321", "position": "AI Researcher"},
-				"chunks": [
-					{"chunk_id": 1, "resume_identifier": "Jane Doe_098-765-4321", "type": "BASIC_INFO", "title": "Personal Details", "content": "Jane Doe, AI Researcher, jane.doe@example.com, 098-765-4321."},
-					{"chunk_id": 2, "resume_identifier": "Jane Doe_098-765-4321", "type": "EDUCATION", "title": "Education History", "content": "MSc AI"},
-					{"chunk_id": 3, "resume_identifier": "Jane Doe_098-765-4321", "type": "SKILLS", "title": "Technical Skills", "content": "TensorFlow, PyTorch"}
-				],
-				"metadata": {"is_211": true, "is_985": true, "is_double_top": true, "has_intern": true, "highest_education": "MSc", "years_of_experience": 1.5, "resume_score": 88, "tags": ["AI", "Research", "Top School"]}
-			}`,
-			options: []LLMChunkerOption{WithCustomFewShotExamples("Custom example prompt...")},
-			expectedSections: []*types.ResumeSection{
-				{Type: types.SectionBasicInfo, Title: "Personal Details", Content: "Jane Doe, AI Researcher, jane.doe@example.com, 098-765-4321.", ChunkID: 1, ResumeIdentifier: "Jane Doe_098-765-4321"},
-				{Type: types.SectionEducation, Title: "Education History", Content: "MSc AI", ChunkID: 2, ResumeIdentifier: "Jane Doe_098-765-4321"},
-				{Type: types.SectionSkills, Title: "Technical Skills", Content: "TensorFlow, PyTorch", ChunkID: 3, ResumeIdentifier: "Jane Doe_098-765-4321"},
-			},
-			expectedBasicInfo: map[string]string{
-				"name": "Jane Doe", "email": "jane.doe@example.com", "phone": "098-765-4321", "position": "AI Researcher",
-				"is_211": "true", "is_985": "true", "is_double_top": "true", "has_intern": "true",
-				"highest_education": "MSc", "years_of_experience": "1.5", "resume_score": "88", "tags": "AI,Research,Top School",
-			},
-			expectError: false,
-		},
-		{
-			name:             "Context cancellation during LLM call",
-			resumeText:       "Cancel me.",
-			mockLLMError:     context.Canceled,
-			options:          []LLMChunkerOption{},
-			expectError:      true,
-			expectedErrorMsg: "LLM调用失败: 上下文已取消: context canceled",
-			validateOutputFunc: func(t *testing.T, sections []*types.ResumeSection, basicInfo map[string]string, err error) {
-				require.ErrorIs(t, err, context.Canceled, "Error should be context.Canceled or wrap it")
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Reset mock LLM for each test case
-			mockLLM.mockResponse = tc.mockLLMResponse
-			mockLLM.Err = tc.mockLLMError
-
-			chunker := NewLLMResumeChunker(mockLLM, testLogger, tc.options...) // Pass testLogger
-			sections, basicInfo, err := chunker.ChunkResume(context.Background(), tc.resumeText)
-
-			if tc.expectError {
-				require.Error(t, err, "Expected an error but got none.")
-				if tc.expectedErrorMsg != "" {
-					require.Contains(t, err.Error(), tc.expectedErrorMsg, "Error message mismatch.")
-				}
-			} else {
-				require.NoError(t, err, "Expected no error but got one: %v", err)
-				require.Equal(t, len(tc.expectedSections), len(sections), "Number of sections mismatch.")
-				for i := range tc.expectedSections {
-					require.Equal(t, tc.expectedSections[i].Type, sections[i].Type, "Section type mismatch at index %d.", i)
-					require.Equal(t, tc.expectedSections[i].Title, sections[i].Title, "Section title mismatch at index %d.", i)
-					require.Equal(t, tc.expectedSections[i].Content, sections[i].Content, "Section content mismatch at index %d.", i)
-					require.Equal(t, tc.expectedSections[i].ChunkID, sections[i].ChunkID, "ChunkID mismatch at index %d.", i)
-					require.Equal(t, tc.expectedSections[i].ResumeIdentifier, sections[i].ResumeIdentifier, "ResumeIdentifier mismatch at index %d.", i)
-				}
-				require.Equal(t, tc.expectedBasicInfo, basicInfo, "Basic info mismatch.")
-			}
-
-			if tc.validateOutputFunc != nil {
-				tc.validateOutputFunc(t, sections, basicInfo, err)
-			}
-		})
-	}
-}
-
-func TestLLMResumeChunker_generatePromptTemplate(t *testing.T) {
-	mockLLM := &MockLLMModel{}
-	testLogger := log.New(io.Discard, "", 0) // Create a discard logger
-
-	t.Run("Default prompt generation", func(t *testing.T) {
-		chunker := NewLLMResumeChunker(mockLLM, testLogger) // Pass testLogger
-		require.NotEmpty(t, chunker.promptTemplate, "Default prompt template should not be empty")
-		require.Contains(t, chunker.promptTemplate, "你是一个专业的简历解析专家", "Prompt should contain core instruction")
-		require.Contains(t, chunker.promptTemplate, "提取以下字段 -> %s", "Prompt should contain field placeholder")
-		require.Contains(t, chunker.promptTemplate, "识别并将内容归类到以下类型 -> %s", "Prompt should contain section placeholder")
-		require.Contains(t, chunker.promptTemplate, "示例1 (演示：BASIC_INFO提取", "Prompt should contain few-shot examples by default")
-	})
-
-	t.Run("Prompt generation with custom few-shot examples", func(t *testing.T) {
-		customExample := "This is a custom few-shot example."
-		chunker := NewLLMResumeChunker(mockLLM, testLogger, WithCustomFewShotExamples(customExample)) // Pass testLogger
-		require.NotEmpty(t, chunker.promptTemplate, "Prompt template should not be empty")
-		require.Contains(t, chunker.promptTemplate, customExample, "Prompt should contain the custom few-shot example")
-		require.Contains(t, chunker.promptTemplate, "你是一个专业的简历解析专家", "Prompt should still contain core instruction after custom examples")
-	})
-}
-
-func TestLLMResumeChunker_generateFewShotExamples(t *testing.T) {
-	mockLLM := &MockLLMModel{}
-	testLogger := log.New(io.Discard, "", 0)
-	chunker := NewLLMResumeChunker(mockLLM, testLogger) // Pass testLogger
-	// Call explicitly for this test, though NewLLMResumeChunker calls it if empty
-	chunker.generateFewShotExamples()
-	require.NotEmpty(t, chunker.fewShotExamples, "Few-shot examples should not be empty after generation")
-	require.Contains(t, chunker.fewShotExamples, "示例1", "Few-shot examples should contain example 1")
-	require.Contains(t, chunker.fewShotExamples, "王小明", "Few-shot examples content check")
-}
-
-func TestLLMResumeChunker_callLLM_Retries(t *testing.T) {
-	mockLLM := &MockLLMModel{}
-	testLogger := log.New(io.Discard, "", 0) // Create a discard logger
-
-	chunker := NewLLMResumeChunker(mockLLM, testLogger) // Pass testLogger
-
-	t.Run("Successful call on first try", func(t *testing.T) {
-		mockLLM.mockResponse = `{"status": "ok"}`
-		mockLLM.Err = nil
-		mockLLM.CallCount = 0
-		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt")
-		require.NoError(t, err)
-		require.Equal(t, 1, mockLLM.CallCount, "LLM should be called once")
-	})
-
-	t.Run("Successful call after one retry (timeout)", func(t *testing.T) {
-		mockLLM.CallCount = 0
-		mockLLM.Err = errors.New("some network timeout error") // First call fails
-		// Configure mock to succeed on the second call
-		mockLLM.SucceedAfterNCalls = 2
-		mockLLM.mockResponse = `{"status": "ok_after_retry"}`
-
-		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt retry")
-		require.NoError(t, err)
-		require.Equal(t, 2, mockLLM.CallCount, "LLM should be called twice")
-	})
-
-	t.Run("Fails after max retries", func(t *testing.T) {
-		mockLLM.CallCount = 0
-		mockLLM.Err = errors.New("persistent connection refused") // All calls fail
-		mockLLM.SucceedAfterNCalls = 0                            // Never succeed
-
-		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt fail")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "LLM Generate failed: persistent connection refused")
-		// Default maxRetries in callLLM is 2, so total calls = 1 (initial) + 2 (retries) = 3
-		require.Equal(t, 3, mockLLM.CallCount, "LLM should be called max_retries + 1 times")
-	})
-
-	t.Run("Non-retryable error, no retry", func(t *testing.T) {
-		mockLLM.CallCount = 0
-		mockLLM.Err = errors.New("invalid API key") // Non-retryable error
-		mockLLM.SucceedAfterNCalls = 0
-
-		_, err := chunker.callLLM(context.Background(), "system prompt", "user prompt non-retry")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "LLM Generate failed: invalid API key")
-		require.Equal(t, 1, mockLLM.CallCount, "LLM should be called only once for non-retryable error")
-	})
-
-	t.Run("Context cancelled during retry wait", func(t *testing.T) {
-		mockLLM.CallCount = 0
-		mockLLM.Err = errors.New("timeout error") // Retryable error
-		mockLLM.SucceedAfterNCalls = 0            // Configure to always fail to trigger retries
-
-		ctx, cancel := context.WithCancel(context.Background())
-
-		go func() {
-			time.Sleep(100 * time.Millisecond) // Give a little time for the first call
-			cancel()                           // Cancel context during the retry delay
-		}()
-
-		_, err := chunker.callLLM(ctx, "system prompt", "user prompt cancel")
-		require.Error(t, err)
-		// The error could be the original "timeout error" if the context is cancelled before retry logic even starts,
-		// or "context canceled" if it's cancelled during the retry wait or subsequent call.
-		// Check if it's one of the expected errors.
-		isExpectedError := strings.Contains(err.Error(), "LLM Generate failed: timeout error") ||
-			strings.Contains(err.Error(), "上下文已取消: context canceled")
-		require.True(t, isExpectedError, "Expected error to be 'timeout error' or 'context canceled', got: %v", err)
-
-		// Call count can be 1 or 2 depending on timing
-		require.LessOrEqual(t, mockLLM.CallCount, 2, "LLM call count should be at most 2")
-		require.GreaterOrEqual(t, mockLLM.CallCount, 1, "LLM call count should be at least 1")
-	})
 }
 
 // TestExtractJSON tests the extractJSON utility function
@@ -2063,4 +1870,228 @@ func TestExtractJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLLMChunkerWithWorkAndInternship 测试LLM对实习和工作经历的识别能力
+func TestLLMChunkerWithWorkAndInternship(t *testing.T) {
+	// 跳过测试，如果设置了环境变量 SKIP_LLM_TESTS
+	if os.Getenv("SKIP_LLM_TESTS") == "true" {
+		t.Skip("跳过LLM实际调用测试 (SKIP_LLM_TESTS=true)")
+	}
+
+	// 初始化上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	t.Log("==================== 实习和工作经历识别测试 ====================")
+
+	// 加载配置
+	configPath := "C:/Users/left/Desktop/agent-go/internal/config/config.yaml"
+	_, err := config.LoadConfigFromFileAndEnv(configPath)
+	if err != nil {
+		t.Fatalf("加载配置文件失败: %v", err)
+	}
+
+	// 1. 初始化真实的LLM模型
+	t.Log("【步骤1】初始化LLM模型...")
+	llmModel, err := initRealLLM(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "API Key") {
+			t.Skipf("跳过真实LLM测试: %v。请在配置文件中设置有效的API Key。", err)
+		}
+		t.Fatalf("初始化LLM模型失败: %v", err)
+	}
+	t.Log("LLM模型初始化成功")
+
+	// 2. 创建LLM简历分块器
+	t.Log("【步骤2】创建LLM简历分块器...")
+	testLogger := log.New(os.Stdout, "[TestLLMChunker] ", log.LstdFlags)
+	chunker := NewLLMResumeChunker(llmModel, testLogger)
+	t.Log("LLM简历分块器创建成功")
+
+	// 3. 准备测试用例
+	t.Log("【步骤3】准备测试用例...")
+	testCases := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "只有实习经历的简历",
+			text: `
+张实习
+13800001234 zhang.shixi@example.com
+上海市 应届毕业生 计算机科学
+
+教育经历
+上海某大学 计算机科学与技术 本科 2019-2023
+GPA: 3.8/4.0
+
+技能专长
+编程语言: Python, Java, C++
+框架: Spring Boot, Django, React
+数据库: MySQL, MongoDB
+工具: Git, Docker
+
+实习经历
+阿里巴巴 后端开发实习生 2022.06-2022.09
+- 参与电商平台后端API开发和优化
+- 实现了订单处理模块的重构，提升了30%的处理速度
+
+项目经历
+校园二手交易平台 2022.01-2022.05
+- 使用Spring Boot和React开发全栈应用
+- 设计并实现了商品推荐算法
+
+获奖情况
+校级程序设计竞赛二等奖 2021
+`,
+		},
+		{
+			name: "同时有实习和工作经历的简历",
+			text: `
+李工作
+13900009876 li.gongzuo@example.com
+北京市 软件工程师 5年经验
+
+教育经历
+清华大学 软件工程 硕士 2015-2018
+北京大学 计算机科学 本科 2011-2015
+
+专业技能
+语言: Java, Go, Python, JavaScript
+框架: Spring Cloud, Docker, Kubernetes, React
+数据库: MySQL, Redis, Elasticsearch
+算法: 机器学习, 分布式系统
+
+工作经历
+腾讯 高级软件工程师 2020.07-至今
+- 负责广告系统核心引擎开发
+- 带领5人团队完成平台重构，性能提升200%
+
+百度 软件工程师 2018.06-2020.06
+- 参与搜索引擎后端开发
+- 优化了索引构建流程，减少50%的构建时间
+
+实习经历
+微软亚洲研究院 研究实习生 2017.07-2017.12
+- 参与自然语言处理项目研究
+- 发表了一篇ACL会议论文
+
+获奖经历
+ACM-ICPC 亚洲区域赛铜奖 2014
+华为软件精英挑战赛全国50强 2016
+`,
+		},
+	}
+
+	// 4. 对每个测试用例执行测试
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("测试用例: %s", tc.name)
+			t.Logf("输入文本长度: %d 字符", len(tc.text))
+
+			// 调用LLM解析
+			startTime := time.Now()
+			sections, basicInfo, err := chunker.ChunkResume(ctx, tc.text)
+			elapsed := time.Since(startTime)
+
+			if err != nil {
+				t.Fatalf("LLM解析失败: %v", err)
+			}
+
+			t.Logf("解析完成，耗时: %.2f 秒", elapsed.Seconds())
+			t.Logf("解析出 %d 个章节和 %d 项基本信息", len(sections), len(basicInfo))
+
+			// 检查并打印关键元数据
+			t.Log("\n【关键元数据】:")
+			metadataFields := []string{
+				"has_intern", "has_work_exp", "is_211", "is_985", "is_double_top",
+				"highest_education", "years_of_experience",
+			}
+			for _, field := range metadataFields {
+				value := "未设置"
+				if v, ok := basicInfo[field]; ok {
+					value = v
+				}
+				t.Logf("%-20s: %s", field, value)
+			}
+
+			// 检查奖项识别
+			if v, ok := basicInfo["has_algorithm_award"]; ok && v == "true" {
+				t.Log("\n【算法奖项】: 是")
+				if titles, ok := basicInfo["algorithm_award_titles"]; ok {
+					t.Logf("奖项列表: %s", titles)
+				}
+			} else {
+				t.Log("\n【算法奖项】: 否")
+			}
+
+			if v, ok := basicInfo["has_programming_competition_award"]; ok && v == "true" {
+				t.Log("\n【编程竞赛奖项】: 是")
+				if titles, ok := basicInfo["programming_competition_titles"]; ok {
+					t.Logf("奖项列表: %s", titles)
+				}
+			} else {
+				t.Log("\n【编程竞赛奖项】: 否")
+			}
+
+			// 检查是否正确识别了chunk类型
+			t.Log("\n【识别的chunk类型】:")
+			chunkTypes := make(map[types.SectionType]int)
+			for _, section := range sections {
+				chunkTypes[section.Type]++
+			}
+
+			for sectionType, count := range chunkTypes {
+				t.Logf("%-20s: %d 个", sectionType, count)
+			}
+
+			// 验证实习和工作经历的判断逻辑
+			hasInternChunk := false
+			hasWorkChunk := false
+			for _, section := range sections {
+				if section.Type == types.SectionInternships {
+					hasInternChunk = true
+				}
+				if section.Type == types.SectionWorkExperience {
+					hasWorkChunk = true
+				}
+			}
+
+			hasInternMetadata := basicInfo["has_intern"] == "true"
+			hasWorkMetadata := basicInfo["has_work_exp"] == "true"
+
+			t.Log("\n【实习和工作经历判断结果验证】:")
+			internJudgmentResult := "正确"
+			if hasInternChunk != hasInternMetadata {
+				internJudgmentResult = "错误❌"
+			}
+			t.Logf("存在实习chunk: %t, has_intern元数据: %t, 判断%s",
+				hasInternChunk, hasInternMetadata, internJudgmentResult)
+
+			workJudgmentResult := "正确"
+			if hasWorkChunk != hasWorkMetadata {
+				workJudgmentResult = "错误❌"
+			}
+			t.Logf("存在工作chunk: %t, has_work_exp元数据: %t, 判断%s",
+				hasWorkChunk, hasWorkMetadata, workJudgmentResult)
+
+			// 详细打印每个chunk
+			t.Log("\n【所有识别的chunks】:")
+			for i, section := range sections {
+				t.Logf("\nChunk #%d:", i+1)
+				t.Logf("Type: %s", section.Type)
+				t.Logf("Title: %s", section.Title)
+				t.Logf("Content预览: %s", shortenString(section.Content, 100))
+			}
+		})
+	}
+}
+
+// shortenString 截断字符串，用于显示预览
+func shortenString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

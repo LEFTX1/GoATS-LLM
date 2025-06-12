@@ -10,7 +10,9 @@ import (
 	"strconv"
 
 	"ai-agent-go/internal/config"
+	"ai-agent-go/internal/constants"
 	"ai-agent-go/internal/storage"
+	"ai-agent-go/internal/storage/models"
 	"ai-agent-go/internal/types"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -37,19 +39,34 @@ func NewResumePaginatedHandler(cfg *config.Config, storage *storage.Storage) *Re
 func (h *ResumePaginatedHandler) HandlePaginatedResumeSearch(ctx context.Context, c *app.RequestContext) {
 	// 1. 获取参数
 	jobID := c.Param("job_id")
-
-	// 从查询参数获取cursor和size
-	cursorStr := c.Query("cursor")
-	sizeStr := c.Query("size")
-
-	cursor := int64(0)
-	size := int64(10) // 默认大小
-
-	if cursorStr != "" {
-		if val, err := strconv.ParseInt(cursorStr, 10, 64); err == nil {
-			cursor = val
-		}
+	if jobID == "" {
+		c.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "job_id 不能为空"})
+		return
 	}
+
+	// 从认证中间件获取 hr_id
+	hrIDValue, exists := c.Get("hr_id")
+	if !exists {
+		c.JSON(consts.StatusInternalServerError, map[string]interface{}{"error": "从上下文中获取 hr_id 失败"})
+		return
+	}
+	hrID, ok := hrIDValue.(string)
+	if !ok || hrID == "" {
+		c.JSON(consts.StatusInternalServerError, map[string]interface{}{"error": "hr_id 格式不正确或为空"})
+		return
+	}
+
+	// 统一使用包含 hrID 的缓存键
+	cacheKey := fmt.Sprintf(constants.KeySearchSession, jobID, hrID)
+
+	// 获取分页参数
+	cursor, err := strconv.ParseInt(c.Query("cursor"), 10, 64)
+	if err != nil || cursor < 0 {
+		cursor = 0
+	}
+
+	sizeStr := c.Query("size")
+	size := int64(10) // 默认大小
 
 	if sizeStr != "" {
 		if val, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && val > 0 && val <= 100 {
@@ -57,22 +74,8 @@ func (h *ResumePaginatedHandler) HandlePaginatedResumeSearch(ctx context.Context
 		}
 	}
 
-	// 2. 获取HR ID (从上下文中，由认证中间件设置)
-	hrID, exists := c.Get("hr_id")
-	if !exists {
-		c.JSON(consts.StatusUnauthorized, map[string]interface{}{
-			"error": "未授权访问",
-		})
-		return
-	}
-
 	h.logger.Printf("开始处理分页查询请求, jobID: %s, hrID: %s, cursor: %d, size: %d",
 		jobID, hrID, cursor, size)
-
-	// 3. 生成缓存键 - 与JobSearchHandler使用相同的格式
-	// 注意: JobSearchHandler使用的格式是 "search_session:{jobID}"
-	cacheKey := fmt.Sprintf("search_session:%s", jobID)
-	h.logger.Printf("使用缓存键: %s", cacheKey)
 
 	// 4. 从Redis ZSET获取指定批次的UUID
 	uuids, totalCount, err := h.storage.Redis.GetCachedSearchResults(ctx, cacheKey, cursor, size)
@@ -138,31 +141,20 @@ func (h *ResumePaginatedHandler) fetchResumeDetails(ctx context.Context, uuids [
 	// 创建结果数组
 	result := make([]types.ResumeWithChunks, 0, len(uuids))
 
-	// 批量查询简历基本信息
-	type BasicInfoResult struct {
-		SubmissionUUID     string
-		LLMParsedBasicInfo json.RawMessage
-	}
-
-	var basicInfoResults []BasicInfoResult
+	// 批量查询简历基本信息，并预加载关联的 Candidate
+	var submissions []models.ResumeSubmission
 	err := h.storage.MySQL.DB().WithContext(ctx).
-		Raw(`SELECT submission_uuid, llm_parsed_basic_info 
-			FROM resume_submissions 
-			WHERE submission_uuid IN (?)`, uuids).
-		Scan(&basicInfoResults).Error
+		Preload("Candidate").
+		Where("submission_uuid IN (?)", uuids).
+		Find(&submissions).Error
 	if err != nil {
 		return nil, fmt.Errorf("查询简历基本信息失败: %w", err)
 	}
 
-	// 解析基本信息并创建映射
-	basicInfoMap := make(map[string]map[string]string)
-	for _, info := range basicInfoResults {
-		var basicInfo map[string]string
-		if err := json.Unmarshal(info.LLMParsedBasicInfo, &basicInfo); err != nil {
-			h.logger.Printf("解析简历 %s 的基本信息失败: %v", info.SubmissionUUID, err)
-			basicInfo = map[string]string{} // 使用空映射
-		}
-		basicInfoMap[info.SubmissionUUID] = basicInfo
+	// 将简历基本信息放入 map 中以便快速查找
+	submissionMap := make(map[string]models.ResumeSubmission)
+	for _, sub := range submissions {
+		submissionMap[sub.SubmissionUUID] = sub
 	}
 
 	// 批量查询简历块
@@ -188,21 +180,37 @@ func (h *ResumePaginatedHandler) fetchResumeDetails(ctx context.Context, uuids [
 	h.logger.Printf("查询到 %d 个简历块", len(chunkResults))
 
 	// 按UUID分组块
-	resumeMap := make(map[string]*types.ResumeWithChunks)
+	resumeDataMap := make(map[string]*types.ResumeWithChunks)
 
 	for _, chunk := range chunkResults {
-		if _, exists := resumeMap[chunk.SubmissionUUID]; !exists {
+		if _, exists := resumeDataMap[chunk.SubmissionUUID]; !exists {
 			// 创建新的简历条目
-			resumeMap[chunk.SubmissionUUID] = &types.ResumeWithChunks{
-				SubmissionUUID: chunk.SubmissionUUID,
-				BasicInfo:      basicInfoMap[chunk.SubmissionUUID],
-				Chunks:         []types.ResumeChunkData{},
+			baseSub, _ := submissionMap[chunk.SubmissionUUID]
+			var basicInfo map[string]string
+			_ = json.Unmarshal(baseSub.LLMParsedBasicInfo, &basicInfo)
+
+			candidateName := ""
+			if baseSub.Candidate != nil {
+				candidateName = baseSub.Candidate.PrimaryName
+			}
+
+			resumeDataMap[chunk.SubmissionUUID] = &types.ResumeWithChunks{
+				SubmissionUUID:   chunk.SubmissionUUID,
+				OriginalFilename: baseSub.OriginalFilename,
+				CandidateName:    candidateName,
+				HighestEducation: baseSub.HighestEducation,
+				YearsOfExp:       baseSub.YearsOfExp,
+				Is211:            baseSub.Is211,
+				Is985:            baseSub.Is985,
+				IsDoubleTop:      baseSub.IsDoubleTop,
+				BasicInfo:        basicInfo, // 仍然填充旧字段以实现兼容
+				Chunks:           []types.ResumeChunkData{},
 			}
 		}
 
 		// 添加块
-		resumeMap[chunk.SubmissionUUID].Chunks = append(
-			resumeMap[chunk.SubmissionUUID].Chunks,
+		resumeDataMap[chunk.SubmissionUUID].Chunks = append(
+			resumeDataMap[chunk.SubmissionUUID].Chunks,
 			types.ResumeChunkData{
 				ChunkID:     chunk.ChunkIDInSubmission,
 				ChunkType:   chunk.ChunkType,
@@ -214,18 +222,33 @@ func (h *ResumePaginatedHandler) fetchResumeDetails(ctx context.Context, uuids [
 
 	// 按照传入的UUID顺序组织结果
 	for _, uuid := range uuids {
-		if resume, exists := resumeMap[uuid]; exists {
+		if resume, exists := resumeDataMap[uuid]; exists {
 			// 确保每个简历内的块按照ChunkID排序
 			sort.Slice(resume.Chunks, func(i, j int) bool {
 				return resume.Chunks[i].ChunkID < resume.Chunks[j].ChunkID
 			})
 			result = append(result, *resume)
-		} else {
-			// 如果没有找到相应的块，创建一个只有基本信息的条目
+		} else if baseSub, exists := submissionMap[uuid]; exists {
+			// 如果简历没有任何块，也要确保它被包括在内
+			var basicInfo map[string]string
+			_ = json.Unmarshal(baseSub.LLMParsedBasicInfo, &basicInfo)
+
+			candidateName := ""
+			if baseSub.Candidate != nil {
+				candidateName = baseSub.Candidate.PrimaryName
+			}
+
 			result = append(result, types.ResumeWithChunks{
-				SubmissionUUID: uuid,
-				BasicInfo:      basicInfoMap[uuid],
-				Chunks:         []types.ResumeChunkData{},
+				SubmissionUUID:   uuid,
+				OriginalFilename: baseSub.OriginalFilename,
+				CandidateName:    candidateName,
+				HighestEducation: baseSub.HighestEducation,
+				YearsOfExp:       baseSub.YearsOfExp,
+				Is211:            baseSub.Is211,
+				Is985:            baseSub.Is985,
+				IsDoubleTop:      baseSub.IsDoubleTop,
+				BasicInfo:        basicInfo,
+				Chunks:           []types.ResumeChunkData{},
 			})
 		}
 	}

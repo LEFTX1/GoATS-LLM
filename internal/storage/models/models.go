@@ -75,6 +75,16 @@ type ResumeSubmission struct {
 	LLMResumeIdentifier string         `gorm:"type:varchar(255)"`
 	ProcessingStatus    string         `gorm:"type:varchar(50);default:'PENDING_PARSING';index:idx_rs_processing_status"`
 	ParserVersion       string         `gorm:"type:varchar(50)"`
+	Is211               bool           `gorm:"type:tinyint(1);default:0"`
+	Is985               bool           `gorm:"type:tinyint(1);default:0"`
+	IsDoubleTop         bool           `gorm:"type:tinyint(1);default:0"`
+	HasInternExp        bool           `gorm:"type:tinyint(1);default:0"`
+	HasWorkExp          bool           `gorm:"type:tinyint(1);default:0"`
+	HighestEducation    string         `gorm:"type:varchar(20)"`
+	YearsOfExp          float32        `gorm:"type:decimal(3,1)"`
+	HasAlgoAward        bool           `gorm:"type:tinyint(1);default:0"`
+	HasProgAward        bool           `gorm:"type:tinyint(1);default:0"`
+	MetaExtra           datatypes.JSON `gorm:"type:json"`
 	CreatedAt           time.Time      `gorm:"type:datetime(6);default:CURRENT_TIMESTAMP(6)"`
 	UpdatedAt           time.Time      `gorm:"type:datetime(6);default:CURRENT_TIMESTAMP(6);autoUpdateTime"`
 

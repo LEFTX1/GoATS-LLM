@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	// 用于加载.env文件
+	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
 
@@ -231,6 +233,18 @@ type RerankerConfig struct {
 
 // LoadConfig 从文件加载配置
 func LoadConfig(configPath string) (*Config, error) {
+	// 尝试加载.env文件（如果存在）
+	// 加载顺序: ./.env -> ../.env -> ../../.env
+	envPaths := []string{".env", "../.env", "../../.env"}
+	for _, envPath := range envPaths {
+		if _, err := os.Stat(envPath); err == nil {
+			if err := godotenv.Load(envPath); err == nil {
+				fmt.Printf("成功加载环境变量文件: %s\n", envPath)
+				break
+			}
+		}
+	}
+
 	// 如果未指定配置文件路径，则尝试在默认位置查找
 	if configPath == "" {
 		// 尝试在常见位置查找配置文件
@@ -344,14 +358,45 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	// 从环境变量覆盖配置（如果存在）
-	if envKey := os.Getenv("ALIYUN_API_KEY"); envKey != "" {
+	// 阿里云API密钥配置
+	if envKey := os.Getenv("DASHSCOPE_API_KEY"); envKey != "" {
 		config.Aliyun.APIKey = envKey
+	} else if envKey := os.Getenv("ALIYUN_API_KEY"); envKey != "" {
+		config.Aliyun.APIKey = envKey // 向后兼容
 	}
+
+	// 阿里云其他配置
 	if envURL := os.Getenv("ALIYUN_API_URL"); envURL != "" {
 		config.Aliyun.APIURL = envURL
 	}
 	if envModel := os.Getenv("ALIYUN_MODEL"); envModel != "" {
 		config.Aliyun.Model = envModel
+	}
+
+	// 数据库凭据配置
+	if mysqlPassword := os.Getenv("MYSQL_PASSWORD"); mysqlPassword != "" {
+		config.MySQL.Password = mysqlPassword
+	}
+
+	// MinIO凭据配置
+	if minioAccessKey := os.Getenv("MINIO_ACCESS_KEY_ID"); minioAccessKey != "" {
+		config.MinIO.AccessKeyID = minioAccessKey
+	}
+	if minioSecretKey := os.Getenv("MINIO_SECRET_KEY"); minioSecretKey != "" {
+		config.MinIO.SecretAccessKey = minioSecretKey
+	}
+
+	// RabbitMQ凭据配置
+	if rabbitmqUsername := os.Getenv("RABBITMQ_USERNAME"); rabbitmqUsername != "" {
+		config.RabbitMQ.Username = rabbitmqUsername
+	}
+	if rabbitmqPassword := os.Getenv("RABBITMQ_PASSWORD"); rabbitmqPassword != "" {
+		config.RabbitMQ.Password = rabbitmqPassword
+	}
+
+	// Redis凭据配置
+	if redisPassword := os.Getenv("REDIS_PASSWORD"); redisPassword != "" {
+		config.Redis.Password = redisPassword
 	}
 
 	// 设置默认值 (如果需要)
@@ -417,7 +462,7 @@ func LoadConfigFromFileOnly(configPath string) (*Config, error) {
 
 	// Ensure embedding defaults are set if not present in YAML
 	if config.Aliyun.Embedding.Model == "" {
-		config.Aliyun.Embedding.Model = "text-embedding-v3"
+		config.Aliyun.Embedding.Model = "text-embedding-v4"
 	}
 	if config.Aliyun.Embedding.Dimensions == 0 {
 		config.Aliyun.Embedding.Dimensions = 1024
@@ -443,6 +488,78 @@ func LoadConfigFromFileOnly(configPath string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// LoadConfigFromFileAndEnv
+func LoadConfigFromFileAndEnv(configPath string) (*Config, error) {
+	if configPath == "" {
+		return nil, fmt.Errorf("必须提供配置文件路径")
+	}
+
+	// 基于配置文件路径构建多个可能的.env文件路径
+	// 这比依赖当前工作目录更健壮
+	envPaths := []string{
+		".env", // 当前目录
+		filepath.Join(filepath.Dir(configPath), ".env"), // 与配置文件同级
+		filepath.Join(filepath.Dir(configPath), "../.env"),
+		filepath.Join(filepath.Dir(configPath), "../../.env"),
+	}
+
+	// 遍历路径，找到并加载第一个存在的.env文件
+	envLoaded := false
+	for _, envPath := range envPaths {
+		if _, err := os.Stat(envPath); err == nil {
+			if err := godotenv.Load(envPath); err == nil {
+				fmt.Printf("成功加载环境变量文件: %s\n", envPath)
+				envLoaded = true
+				break
+			}
+		}
+	}
+
+	if !envLoaded {
+		fmt.Println("警告: 未找到任何 .env 文件，将仅依赖现有环境变量和配置文件")
+	}
+
+	// 读取YAML配置文件
+	yamlFile, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+
+	// 解析配置文件
+	var cfg Config
+	if err := yaml.Unmarshal(yamlFile, &cfg); err != nil {
+		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+	}
+
+	// 优先使用环境变量中的API Key
+	if envKey := os.Getenv("DASHSCOPE_API_KEY"); envKey != "" {
+		cfg.Aliyun.APIKey = envKey
+	}
+
+	// 设置默认值 (如果需要)
+	if cfg.RabbitMQ.RetryInterval == "" {
+		cfg.RabbitMQ.RetryInterval = "5s"
+	}
+	if cfg.Server.Address == "" {
+		cfg.Server.Address = ":8080" // 默认服务器地址
+	}
+
+	// MinIO对象存储生命周期管理
+	if cfg.MinIO.OriginalFileExpireDays == 0 {
+		cfg.MinIO.OriginalFileExpireDays = 1095 // 默认3年过期
+	}
+	if cfg.MinIO.ParsedTextExpireDays == 0 {
+		cfg.MinIO.ParsedTextExpireDays = 1095 // 默认3年过期
+	}
+
+	// Parser Version 默认配置
+	if cfg.ActiveParserVersion == "" {
+		cfg.ActiveParserVersion = "tika-server-default"
+	}
+
+	return &cfg, nil
 }
 
 // 创建一个默认配置，用于测试环境
@@ -533,26 +650,6 @@ func createDefaultConfig() *Config {
 		"text/plain",
 	}
 
-	// Parser Version 默认配置
-	config.ActiveParserVersion = "tika-server-default"
-
-	// 获取环境变量
-	if envKey := os.Getenv("ALIYUN_API_KEY"); envKey != "" {
-		config.Aliyun.APIKey = envKey
-	} else {
-		config.Aliyun.APIKey = "test_api_key"
-	}
-
-	// 设置默认值 (如果需要)
-	if config.RabbitMQ.RetryInterval == "" {
-		config.RabbitMQ.RetryInterval = "5s"
-	}
-
-	// MinIO对象存储生命周期管理
-	config.MinIO.OriginalFileExpireDays = 1095 // 默认3年过期
-	config.MinIO.ParsedTextExpireDays = 1095   // 默认3年过期
-	config.MinIO.EnableTestLogging = false     // 默认在createDefaultConfig中设置为false (重复设置，保持一致)
-
 	// 日志默认配置
 	config.Logger.Level = "info"
 	config.Logger.Format = "pretty" // 开发环境默认使用美化输出
@@ -625,4 +722,14 @@ func GetDuration(durationStr string, defaultDuration time.Duration) time.Duratio
 		return defaultDuration
 	}
 	return d
+}
+
+// 辅助函数，检查字符串是否在切片中
+func containsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }

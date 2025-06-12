@@ -251,162 +251,79 @@ func (r *Redis) CheckMD5Exists(ctx context.Context, setKey string, md5Hex string
 	return r.Client.SIsMember(ctx, setKey, md5Hex).Result()
 }
 
-// SetJobVector 缓存JD向量
-// vector: float64 类型的向量，将进行JSON序列化存储
-// modelVersion: 生成该向量的嵌入模型版本
+// SetJobVector 将 JD 向量和模型版本存入 Redis HASH。
+// 使用 HASH 可以将向量和模型版本存在同一个 key 下，便于管理。
 func (r *Redis) SetJobVector(ctx context.Context, jobID string, vector []float64, modelVersion string) error {
-	// 创建一个命名span
-	ctx, span := redisTracer.Start(ctx, "Redis.SetJobVector",
-		trace.WithSpanKind(trace.SpanKindClient))
-	defer span.End()
-
-	// 添加属性
-	span.SetAttributes(
-		semconv.DBSystemRedis,
-		attribute.String("db.redis.database", fmt.Sprintf("%d", r.config.DB)),
-		attribute.String("net.peer.name", r.config.Address),
-		attribute.String("db.operation", "JSON_SET"),
-		attribute.String("job_id", jobID),
-		attribute.String("model_version", modelVersion),
-		attribute.Int("vector_dimensions", len(vector)),
-	)
-
 	if r.Client == nil {
-		err := fmt.Errorf("redis client is not initialized")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return err
+		return fmt.Errorf("redis client is not initialized")
 	}
 
-	key := r.FormatKey(constants.JobVectorCachePrefix, jobID)
+	cacheKey := fmt.Sprintf(constants.KeyJobDescriptionVector, jobID)
 
-	// 将向量和模型版本一起存储，例如在一个JSON对象中
-	cachedData := map[string]interface{}{
-		"vector":        vector,
-		"model_version": modelVersion,
-	}
-	jsonData, err := json.Marshal(cachedData)
+	// 将向量序列化为 JSON
+	vectorJSON, err := json.Marshal(vector)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("序列化JD向量缓存数据失败: %w", err)
+		return fmt.Errorf("序列化向量失败: %w", err)
 	}
 
-	// 使用带上下文的命令
-	err = r.Client.Set(ctx, key, jsonData, 0).Err()
+	// 使用 pipeline 原子化操作
+	pipe := r.Client.Pipeline()
+	pipe.HSet(ctx, cacheKey, "vector", vectorJSON)
+	pipe.HSet(ctx, cacheKey, "model_version", modelVersion)
+	pipe.Expire(ctx, cacheKey, 24*time.Hour) // 设置1天过期
+
+	_, err = pipe.Exec(ctx)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("缓存JD向量失败: %w", err)
+		return fmt.Errorf("设置 JD 向量缓存失败: %w", err)
 	}
-
-	span.SetStatus(codes.Ok, "")
 	return nil
 }
 
-// GetJobVector 从缓存获取JD向量和模型版本
+// GetJobVector 从 Redis HASH 中获取 JD 向量和模型版本。
 func (r *Redis) GetJobVector(ctx context.Context, jobID string) ([]float64, string, error) {
-	// 创建一个命名span
-	ctx, span := redisTracer.Start(ctx, "Redis.GetJobVector",
-		trace.WithSpanKind(trace.SpanKindClient))
-	defer span.End()
-
-	// 添加属性
-	span.SetAttributes(
-		semconv.DBSystemRedis,
-		attribute.String("db.redis.database", fmt.Sprintf("%d", r.config.DB)),
-		attribute.String("net.peer.name", r.config.Address),
-		attribute.String("db.operation", "GET"),
-		attribute.String("job_id", jobID),
-	)
-
 	if r.Client == nil {
-		err := fmt.Errorf("redis client is not initialized")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		return nil, "", fmt.Errorf("redis client is not initialized")
+	}
+
+	cacheKey := fmt.Sprintf(constants.KeyJobDescriptionVector, jobID)
+
+	// 使用 HMGet 一次性获取两个字段
+	vals, err := r.Client.HMGet(ctx, cacheKey, "vector", "model_version").Result()
+	if err != nil {
 		return nil, "", err
 	}
 
-	key := r.FormatKey(constants.JobVectorCachePrefix, jobID)
-
-	// 从Redis获取已序列化的数据
-	jsonData, err := r.Client.Get(ctx, key).Result()
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		if err == redis.Nil {
-			return nil, "", fmt.Errorf("未找到JD向量缓存，jobID=%s: %w", jobID, err)
-		}
-		return nil, "", fmt.Errorf("获取JD向量缓存失败: %w", err)
+	// 检查返回结果的有效性
+	if len(vals) < 2 {
+		return nil, "", ErrNotFound // 或其他自定义错误
 	}
 
-	// 解析JSON数据，使用map和具体类型
-	type vectorData struct {
-		Vector       []float64 `json:"vector"`
-		ModelVersion string    `json:"model_version"`
+	// 字段 "vector"
+	if vals[0] == nil {
+		return nil, "", fmt.Errorf("未找到JD向量缓存，jobID=%s: %w", jobID, ErrNotFound)
+	}
+	vectorJSON, ok := vals[0].(string)
+	if !ok || vectorJSON == "" {
+		return nil, "", fmt.Errorf("向量缓存格式错误")
+	}
+	var vector []float64
+	if err := json.Unmarshal([]byte(vectorJSON), &vector); err != nil {
+		return nil, "", fmt.Errorf("反序列化向量失败: %w", err)
 	}
 
-	var data vectorData
-	if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, "", fmt.Errorf("解析JD向量缓存数据失败: %w", err)
+	// 字段 "model_version"
+	if vals[1] == nil {
+		return vector, "", fmt.Errorf("向量模型版本未找到")
+	}
+	modelVersion, ok := vals[1].(string)
+	if !ok {
+		return vector, "", fmt.Errorf("向量模型版本格式错误")
 	}
 
-	// 回落机制：如果新格式解析失败，尝试旧格式
-	if len(data.Vector) == 0 || data.ModelVersion == "" {
-		var oldFormat map[string]interface{}
-		if err := json.Unmarshal([]byte(jsonData), &oldFormat); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			return nil, "", fmt.Errorf("解析JD向量缓存数据失败(旧格式): %w", err)
-		}
-
-		// 尝试提取向量和模型版本
-		vectorData, ok := oldFormat["vector"].([]interface{})
-		if !ok {
-			err := fmt.Errorf("缓存数据中的向量格式无效")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			return nil, "", err
-		}
-
-		modelVersion, ok := oldFormat["model_version"].(string)
-		if !ok {
-			err := fmt.Errorf("缓存数据中的模型版本格式无效")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			return nil, "", err
-		}
-
-		// 将[]interface{}转换回[]float64
-		vector := make([]float64, len(vectorData))
-		for i, v := range vectorData {
-			if f, ok := v.(float64); ok {
-				vector[i] = f
-			} else {
-				err := fmt.Errorf("向量元素类型无效，期望float64但得到%T", v)
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-				return nil, "", err
-			}
-		}
-
-		data.Vector = vector
-		data.ModelVersion = modelVersion
-	}
-
-	span.SetAttributes(
-		attribute.Int("vector_dimensions", len(data.Vector)),
-		attribute.String("model_version", data.ModelVersion),
-	)
-	span.SetStatus(codes.Ok, "")
-
-	return data.Vector, data.ModelVersion, nil
+	return vector, modelVersion, nil
 }
 
-// SetJobKeywords 缓存JD关键词
-// keywordsJSON: 已经是JSON字符串的关键词列表
+// SetJobKeywords 将岗位的关键词存入Redis
 func (r *Redis) SetJobKeywords(ctx context.Context, jobID string, keywordsJSON string) error {
 	if r.Client == nil {
 		return fmt.Errorf("redis client is not initialized")
@@ -678,121 +595,164 @@ func (r *Redis) Set(ctx context.Context, key string, value string, expiration ti
 	return nil
 }
 
-// CacheSearchResults将排序好的"黄金结果集"缓存到Redis的ZSET中。
-// searchID是该次搜索的唯一标识，results是排序后的简历列表，ttl是缓存过期时间。
+// CacheSearchResults 将完整的、排序后的搜索结果UUID列表缓存到Redis的ZSET中。
 func (r *Redis) CacheSearchResults(ctx context.Context, searchID string, results []types.RankedSubmission, ttl time.Duration) error {
 	if r.Client == nil {
 		return fmt.Errorf("redis client is not initialized")
 	}
+	if len(results) == 0 {
+		return nil // 不缓存空结果
+	}
 
-	key := r.FormatKey(constants.SearchResultCachePrefix, searchID)
-
+	// 使用pipeline提高性能
 	pipe := r.Client.Pipeline()
 
-	// 准备要添加到ZSET的数据
+	// 先删除旧的key，确保缓存是最新的
+	pipe.Del(ctx, searchID)
+
+	// 准备ZSET的成员
 	members := make([]redis.Z, len(results))
 	for i, res := range results {
 		members[i] = redis.Z{
-			Score:  float64(res.Score),
+			// 使用倒序排名作为分数，分数越高，排名越靠前
+			// 这样 ZREVRANGE 就可以直接按分数从高到低取出，即按原始排名
+			Score:  float64(len(results) - i),
 			Member: res.SubmissionUUID,
 		}
 	}
 
-	// 使用ZAdd命令一次性添加所有成员
-	pipe.ZAdd(ctx, key, members...)
+	// 批量添加到ZSET
+	pipe.ZAdd(ctx, searchID, members...)
+
 	// 设置过期时间
-	pipe.Expire(ctx, key, ttl)
+	pipe.Expire(ctx, searchID, ttl)
 
+	// 执行
 	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("caching search results failed: %w", err)
-	}
-
-	return nil
+	return err
 }
 
-// GetCachedSearchResults从Redis的ZSET中分页获取缓存的搜索结果。
-// 它返回UUID列表、总数和错误。
+// GetCachedSearchResults 从Redis ZSET中获取分页的搜索结果。
 func (r *Redis) GetCachedSearchResults(ctx context.Context, searchID string, cursor, limit int64) (uuids []string, totalCount int64, err error) {
-	if r.Client == nil {
-		return nil, 0, fmt.Errorf("redis client is not initialized")
-	}
-
-	key := r.FormatKey(constants.SearchResultCachePrefix, searchID)
+	ctx, span := redisTracer.Start(ctx, "GetCachedSearchResults", trace.WithAttributes(
+		semconv.DBSystemRedis,
+		attribute.String("redis.key", searchID),
+		attribute.Int64("redis.cursor", cursor),
+		attribute.Int64("redis.limit", limit),
+	))
+	defer span.End()
 
 	pipe := r.Client.Pipeline()
-
-	// 使用 ZREVRANGE 获取按分数从高到低排序的UUID
-	resCmd := pipe.ZRevRange(ctx, key, cursor, cursor+limit-1)
-	// 使用 ZCARD 获取总数
-	countCmd := pipe.ZCard(ctx, key)
-
+	countCmd := pipe.ZCard(ctx, searchID)
+	// 使用 ZRevRange 以确保按分数从高到低排序
+	rangeCmd := pipe.ZRevRange(ctx, searchID, cursor, cursor+limit-1)
 	_, err = pipe.Exec(ctx)
-	if err != nil {
-		// 如果key不存在，redis.Nil错误会在这里被捕获
-		if err == redis.Nil {
-			return nil, 0, nil // 缓存未命中，是正常情况，不返回错误
-		}
-		return nil, 0, fmt.Errorf("getting cached search results failed: %w", err)
+	if err != nil && err != redis.Nil {
+		span.RecordError(err)
+		return nil, 0, err
 	}
 
-	uuids, err = resCmd.Result()
+	// 从 ZRevRange 获取结果
+	uuids, err = rangeCmd.Result()
 	if err != nil {
-		// 再次检查 redis.Nil，尽管不太可能在Exec成功后发生
-		if err == redis.Nil {
-			return nil, 0, nil
-		}
-		return nil, 0, fmt.Errorf("failed to get uuids from cache: %w", err)
+		span.RecordError(err)
+		return nil, 0, fmt.Errorf("failed to get search result UUIDs: %w", err)
 	}
 
 	totalCount, err = countCmd.Result()
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get total count from cache: %w", err)
+		return uuids, 0, err
 	}
 
 	return uuids, totalCount, nil
 }
 
-// AcquireLock 尝试获取分布式锁
-// 返回值: 锁的值(成功时), 错误(如果有)
-// 如果返回空字符串且无错误，表示锁已被其他进程持有
+// AcquireLock 尝试获取一个分布式锁
 func (r *Redis) AcquireLock(ctx context.Context, lockKey string, expiration time.Duration) (string, error) {
-	// 生成随机UUID作为锁的值，用于标识锁的持有者
-	lockValue := fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int())
-
-	// 使用 SET NX 命令尝试获取锁
-	// NX表示key不存在时才设置，PX设置过期时间（毫秒）
+	if r.Client == nil {
+		return "", fmt.Errorf("redis client is not initialized")
+	}
+	// 生成一个随机值作为锁的持有者标识
+	lockValue := fmt.Sprintf("%d", time.Now().UnixNano())
+	// 尝试设置一个带过期时间的key，NX保证了原子性
 	ok, err := r.Client.SetNX(ctx, lockKey, lockValue, expiration).Result()
 	if err != nil {
-		return "", fmt.Errorf("获取锁失败: %w", err)
+		return "", err
 	}
-
-	if !ok {
-		// 锁已被其他进程获取
-		return "", nil
+	if ok {
+		// 成功获取锁
+		return lockValue, nil
 	}
-
-	// 成功获取锁，返回锁标识
-	return lockValue, nil
+	// 未能获取锁
+	return "", nil
 }
 
-// ReleaseLock 释放分布式锁
-// 使用Lua脚本确保原子性：只释放由当前持有者持有的锁
+// ReleaseLock 释放一个分布式锁，使用Lua脚本保证原子性
 func (r *Redis) ReleaseLock(ctx context.Context, lockKey string, lockValue string) (bool, error) {
-	// Lua脚本：仅当锁存在且值匹配时才删除
+	if r.Client == nil {
+		return false, fmt.Errorf("redis client is not initialized")
+	}
+	// Lua脚本: 如果key存在且值匹配，则删除key
 	script := `
-	if redis.call("GET", KEYS[1]) == ARGV[1] then
-		return redis.call("DEL", KEYS[1])
-	else
-		return 0
-	end`
-
-	// 执行Lua脚本
-	result, err := r.Client.Eval(ctx, script, []string{lockKey}, lockValue).Result()
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+    `
+	res, err := r.Client.Eval(ctx, script, []string{lockKey}, lockValue).Result()
 	if err != nil {
-		return false, fmt.Errorf("释放锁失败: %w", err)
+		return false, err
 	}
 
-	// 1表示成功删除，0表示锁不存在或已被其他进程获取
-	return result.(int64) == 1, nil
+	if released, ok := res.(int64); ok && released == 1 {
+		return true, nil // 成功释放
+	}
+
+	return false, nil // 锁不存在或不属于当前持有者
+}
+
+func (r *Redis) checkAndSetMD5(ctx context.Context, md5 string, submissionUUID string) (bool, string, error) {
+	setKey := constants.KeyFileMD5Set
+	// 检查MD5是否存在
+	exists, err := r.Client.SIsMember(ctx, setKey, md5).Result()
+	if err != nil {
+		return false, "", fmt.Errorf("检查MD5是否存在失败: %w", err)
+	}
+	if exists {
+		// MD5已存在，获取关联的submission_uuid
+		mapKey := fmt.Sprintf(constants.KeyFileMD5ToSubmissionUUID, md5)
+		existingUUID, err := r.Client.Get(ctx, mapKey).Result()
+		if err != nil && err != redis.Nil {
+			return true, "", fmt.Errorf("获取已存在的submission_uuid失败: %w", err)
+		}
+		return true, existingUUID, nil
+	}
+	// MD5不存在，原子地添加
+	pipe := r.Client.Pipeline()
+	setCmd := pipe.SAdd(ctx, setKey, md5)
+	mapKey := fmt.Sprintf(constants.KeyFileMD5ToSubmissionUUID, md5)
+	setNXCmd := pipe.SetNX(ctx, mapKey, submissionUUID, r.GetMD5ExpireDuration())
+	// 确保集合本身也有过期时间
+	pipe.Expire(ctx, setKey, r.GetMD5ExpireDuration())
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("执行原子添加MD5操作失败: %w", err)
+	}
+	// 再次检查是否是自己成功设置了值
+	if setCmd.Val() > 0 && setNXCmd.Val() {
+		return false, "", nil // 成功设置了新的MD5
+	}
+	// 在极小的并发窗口中，另一个进程设置了它，重新获取
+	existingUUID, err := r.Client.Get(ctx, mapKey).Result()
+	if err != nil {
+		return true, "", fmt.Errorf("获取已存在的submission_uuid失败: %w", err)
+	}
+	return true, existingUUID, nil
+}
+
+// Deprecated: 请使用 checkAndSetMD5
+func (r *Redis) CheckAndSetMD5(ctx context.Context, md5 string, submissionUUID string) (bool, string, error) {
+	// ... (保留旧实现或标记为弃用)
+	return r.checkAndSetMD5(ctx, md5, submissionUUID)
 }

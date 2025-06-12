@@ -3,18 +3,24 @@ package handler_test
 import (
 	"ai-agent-go/internal/api/handler"
 	"ai-agent-go/internal/config"
+	"ai-agent-go/internal/constants"
+	"ai-agent-go/internal/parser"
+	"ai-agent-go/internal/processor"
 	"ai-agent-go/internal/storage"
+	"ai-agent-go/internal/storage/models"
 	"ai-agent-go/internal/types"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/cloudwego/hertz/pkg/route/param"
-	"github.com/redis/go-redis/v9"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,165 +29,181 @@ const (
 )
 
 // TestResumePaginatedHandler 测试简历分页查询处理器
+// 这是一个集成测试，它首先调用工作搜索处理器来生成缓存，然后测试分页处理器是否能正确地从缓存中读取数据。
 func TestResumePaginatedHandler(t *testing.T) {
-	// 跳过CI环境测试
-	if testing.Short() {
-		t.Skip("在短模式下跳过此测试")
+	// 1. 设置
+	if os.Getenv("CI") != "" {
+		t.Skip("在CI环境中跳过此集成测试")
 	}
 
-	// 1. 设置测试环境
 	ctx := context.Background()
 
-	// 加载配置
-	cfg, err := config.LoadConfigFromFileOnly(paginatedTestConfigPath)
+	cfg, err := config.LoadConfigFromFileAndEnv(paginatedTestConfigPath)
 	require.NoError(t, err, "加载配置失败")
-	require.NotNil(t, cfg, "配置不能为空")
 
-	// 2. 初始化存储组件
 	s, err := storage.NewStorage(ctx, cfg)
 	require.NoError(t, err, "初始化存储组件失败")
 	defer s.Close()
+	require.NotNil(t, s.Redis, "必须配置Redis")
+	require.NotNil(t, s.MySQL, "必须配置MySQL")
+	require.NotNil(t, s.Qdrant, "必须配置Qdrant")
 
-	// 检查Redis是否可用
-	if s.Redis == nil {
-		t.Skip("Redis未配置或不可用，跳过测试")
+	// 2. 定义测试数据
+	testJobID := "job-pagination-test-002"
+	testHRID := "hr-pagination-test-002"
+	jobDesc := `我们正在寻找一位经验丰富的高级Go后端及微服务工程师，加入我们的核心技术团队，负责设计、开发和维护大规模、高可用的分布式系统。您将有机会参与到从架构设计到服务上线的全过程，应对高并发、低延迟的挑战。
+
+**主要职责:**
+1.  负责核心业务系统的后端服务设计与开发，使用Go语言（Golang）作为主要开发语言。
+2.  参与微服务架构的演进，使用gRPC进行服务间通信，并基于Protobuf进行接口定义。
+3.  构建和维护高并发、高可用的系统，有处理秒杀、实时消息等大流量场景的经验。
+4.  深入使用和优化缓存（Redis）和消息队列（Kafka/RabbitMQ），实现系统解耦和性能提升。
+5.  将服务容器化（Docker）并部署在Kubernetes（K8s）集群上，熟悉云原生生态。
+6.  关注系统性能，能够使用pprof等工具进行性能分析和调优。
+
+**任职要求:**
+1.  计算机相关专业本科及以上学历，3年以上Go语言后端开发经验。
+2.  精通Go语言及其并发模型（Goroutine, Channel, Context）。
+3.  熟悉至少一种主流Go微服务框架，如Go-Zero, Gin, Kratos等。
+4.  熟悉gRPC, Protobuf，有丰富的微服务API设计经验。
+5.  熟悉MySQL, Redis, Kafka等常用组件，并有生产环境应用经验。
+6.  熟悉Docker和Kubernetes，理解云原生的基本理念。
+
+**加分项:**
+1.  有主导大型微服务项目重构或设计的经验。
+2.  熟悉Service Mesh（如Istio）、分布式追踪（OpenTelemetry）等服务治理技术。
+3.  对分布式存储（如TiKV）、共识算法（Raft）有深入研究或实践。
+4.  有开源项目贡献或活跃的技术博客。`
+
+	// 3. 准备数据库和缓存
+	job := models.Job{
+		JobID:              testJobID,
+		JobDescriptionText: jobDesc,
 	}
-
-	// 3. 可以测试两种情况：
-	// A. 使用TestFullSearchWithRedisCache生成的真实数据
-	// B. 生成测试数据
-
-	// 选择测试方式
-	useRealData := true // 设置为true使用真实数据，false生成测试数据
-	testJobID := ""
-
-	if useRealData == true {
-		// A. 使用TestFullSearchWithRedisCache生成的真实数据
-		testJobID = "11111111-2222-3333-4444-555555555555" // 与TestFullSearchWithRedisCache使用的相同ID
-		t.Logf("使用真实数据进行测试，JobID: %s", testJobID)
-	} else {
-		// B. 生成测试数据
-		testJobID = "test-job-id-for-pagination"
-		// HR ID 在这个测试中不是必需的，因为我们在后面使用固定值
-
-		cacheKey := fmt.Sprintf("search_session:%s", testJobID)
-
-		t.Logf("使用生成的测试数据，JobID: %s, 缓存键: %s", testJobID, cacheKey)
-
-		// 清除旧的缓存数据
-		_, err = s.Redis.Client.Del(ctx, cacheKey).Result()
-		if err != nil && err != redis.Nil {
-			t.Logf("清除缓存时出错: %v", err)
-		}
-
-		// 创建测试数据 - 将10个UUID存入Redis
-		testUUIDs := []string{
-			"11111111-1111-1111-1111-111111111111",
-			"22222222-2222-2222-2222-222222222222",
-			"33333333-3333-3333-3333-333333333333",
-			"44444444-4444-4444-4444-444444444444",
-			"55555555-5555-5555-5555-555555555555",
-			"66666666-6666-6666-6666-666666666666",
-			"77777777-7777-7777-7777-777777777777",
-			"88888888-8888-8888-8888-888888888888",
-			"99999999-9999-9999-9999-999999999999",
-			"00000000-0000-0000-0000-000000000000",
-		}
-
-		// 按照ZREVRANGE的排序要求，将分数设置为逆序排列（最高分在最前）
-		for i, uuid := range testUUIDs {
-			// 使用10-i作为分数，确保按降序排列
-			err = s.Redis.Client.ZAdd(ctx, cacheKey, redis.Z{
-				Score:  float64(10 - i), // 让分数递减，模拟排序
-				Member: uuid,
-			}).Err()
-			require.NoError(t, err, "向Redis添加测试数据失败")
-		}
+	// 使用Create，如果记录已存在会失败，这有助于确保测试的隔离性
+	err = s.MySQL.DB().WithContext(ctx).Create(&job).Error
+	if err != nil {
+		// 如果记录已存在，为了使测试可重复运行，我们先删除它再创建
+		s.MySQL.DB().WithContext(ctx).Where("job_id = ?", testJobID).Delete(&models.Job{})
+		err = s.MySQL.DB().WithContext(ctx).Create(&job).Error
 	}
+	require.NoError(t, err, "在数据库中创建测试工作失败")
 
-	// 4. 初始化处理器
-	h := handler.NewResumePaginatedHandler(cfg, s)
-
-	// 5. 创建请求上下文
-	c := app.NewContext(16)
-
-	// 添加URL参数
-	c.Params = append(c.Params, param.Param{
-		Key:   "job_id",
-		Value: testJobID,
+	// 清理逻辑
+	t.Cleanup(func() {
+		s.MySQL.DB().WithContext(ctx).Delete(&job)
+		cacheKey := fmt.Sprintf(constants.KeySearchSession, testJobID, testHRID)
+		lockKey := fmt.Sprintf(constants.KeySearchLock, testJobID, testHRID)
+		jdCacheKey := fmt.Sprintf(constants.KeyJobDescriptionText, testJobID)
+		s.Redis.Client.Del(ctx, cacheKey, lockKey, jdCacheKey)
+		t.Log("已从数据库和Redis清理测试数据")
 	})
 
-	// 设置HR ID到上下文中，模拟认证中间件的行为
-	c.Set("hr_id", "test-hr-id") // 对于简单测试，任何非空值都可以
+	// 4. 初始化处理器
+	embedder, err := parser.NewAliyunEmbedder(cfg.Aliyun.APIKey, cfg.Aliyun.Embedding)
+	require.NoError(t, err, "初始化embedder失败")
+	jdProcessor, err := processor.NewJDProcessor(embedder, s, cfg.Aliyun.Embedding.Model)
+	require.NoError(t, err, "初始化JD处理器失败")
+	jobSearchHandler := handler.NewJobSearchHandler(cfg, s, jdProcessor)
+	resumePaginatedHandler := handler.NewResumePaginatedHandler(cfg, s)
 
-	// 添加查询参数 - 获取前5个结果
-	c.QueryArgs().Add("cursor", "0")
-	c.QueryArgs().Add("size", "5")
+	// 5. 阶段1: 运行搜索以填充缓存
+	t.Logf("--- 阶段1: 为JobID=%s运行职位搜索以填充缓存 ---", testJobID)
 
-	// 6. 执行测试
-	h.HandlePaginatedResumeSearch(ctx, c)
+	// 确保没有旧的锁或缓存
+	lockKey := fmt.Sprintf(constants.KeySearchLock, testJobID, testHRID)
+	s.Redis.Client.Del(ctx, lockKey)
+	cacheKey := fmt.Sprintf(constants.KeySearchSession, testJobID, testHRID)
+	s.Redis.Client.Del(ctx, cacheKey)
 
-	// 7. 验证结果
-	statusCode := c.Response.StatusCode()
-	assert.Equal(t, consts.StatusOK, statusCode)
+	cSearch := app.NewContext(16)
+	cSearch.Params = append(cSearch.Params, param.Param{Key: "job_id", Value: testJobID})
+	cSearch.Set("hr_id", testHRID)
+	cSearch.QueryArgs().Add("display_limit", "1")
 
-	var respData types.PaginatedResumeResponse
-	err = json.Unmarshal(c.Response.Body(), &respData)
-	require.NoError(t, err, "解析响应失败")
+	jobSearchHandler.HandleSearchResumesByJobID(ctx, cSearch)
 
-	// 8. 输出并验证结果
-	t.Logf("查询结果: JobID=%s, 总数=%d, 返回%d个简历",
-		respData.JobID, respData.TotalCount, len(respData.Resumes))
+	require.Equal(t, consts.StatusOK, cSearch.Response.StatusCode(), "职位搜索处理器运行失败以填充缓存。响应体: %s", string(cSearch.Response.Body()))
 
-	// 验证基本数据
-	assert.Equal(t, testJobID, respData.JobID)
-	assert.Equal(t, int64(0), respData.Cursor)
-	assert.True(t, respData.TotalCount >= 0, "总数应该大于等于0")
+	// 验证缓存是否已创建
+	cacheExists, err := s.Redis.Client.Exists(ctx, cacheKey).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), cacheExists, "搜索处理器未创建缓存条目")
+	t.Log("--- 缓存已成功填充 ---")
 
-	// 显示简历信息
-	for i, resume := range respData.Resumes {
-		t.Logf("简历 #%d: UUID=%s, 块数=%d",
-			i+1, resume.SubmissionUUID, len(resume.Chunks))
+	// 6. 阶段2: 测试分页
+	t.Logf("--- 阶段2: 为JobID=%s测试分页 ---", testJobID)
+	_, currentFilePath, _, ok := runtime.Caller(0)
+	require.True(t, ok, "获取当前文件路径失败")
+	currentDir := filepath.Dir(currentFilePath)
+
+	type PaginationResults struct {
+		TotalCount int64                           `json:"total_count"`
+		Pages      []types.PaginatedResumeResponse `json:"pages"`
 	}
 
-	// 9. 获取下一页
-	if respData.NextCursor != respData.Cursor && respData.TotalCount > 0 {
-		t.Logf("测试获取下一页，游标=%d", respData.NextCursor)
+	results := PaginationResults{
+		Pages: make([]types.PaginatedResumeResponse, 0, 3),
+	}
 
-		c2 := app.NewContext(16)
-		c2.Params = append(c2.Params, param.Param{
-			Key:   "job_id",
-			Value: testJobID,
-		})
-		c2.Set("hr_id", "test-hr-id")
-		c2.QueryArgs().Add("cursor", fmt.Sprintf("%d", respData.NextCursor))
-		c2.QueryArgs().Add("size", "5")
+	var currentCursor int64 = 0
+	displayLimit := 10
 
-		h.HandlePaginatedResumeSearch(ctx, c2)
+	// 查询最多3页
+	for pageNum := 1; pageNum <= 3; pageNum++ {
+		t.Logf("查询第%d页数据...", pageNum)
+		cPaginated := app.NewContext(16)
+		cPaginated.Params = append(cPaginated.Params, param.Param{Key: "job_id", Value: testJobID})
+		cPaginated.Set("hr_id", testHRID)
+		cPaginated.QueryArgs().Add("cursor", fmt.Sprintf("%d", currentCursor))
+		cPaginated.QueryArgs().Add("size", fmt.Sprintf("%d", displayLimit))
 
-		statusCode = c2.Response.StatusCode()
-		assert.Equal(t, consts.StatusOK, statusCode)
+		resumePaginatedHandler.HandlePaginatedResumeSearch(ctx, cPaginated)
 
-		var respData2 types.PaginatedResumeResponse
-		err = json.Unmarshal(c2.Response.Body(), &respData2)
-		require.NoError(t, err, "解析第二页响应失败")
+		require.Equal(t, consts.StatusOK, cPaginated.Response.StatusCode(), "分页处理器在第%d页失败", pageNum)
 
-		t.Logf("第二页查询结果: 游标=%d, 下一页游标=%d, 返回%d个简历",
-			respData2.Cursor, respData2.NextCursor, len(respData2.Resumes))
+		var respData types.PaginatedResumeResponse
+		err = json.Unmarshal(cPaginated.Response.Body(), &respData)
+		require.NoError(t, err, "解析第%d页响应失败", pageNum)
 
-		// 显示第二页简历信息
-		for i, resume := range respData2.Resumes {
-			t.Logf("第二页简历 #%d: UUID=%s, 块数=%d",
-				i+1, resume.SubmissionUUID, len(resume.Chunks))
+		// 保存页面原始JSON响应
+		pagePath := filepath.Join(currentDir, fmt.Sprintf("paginated_resume_page%d.json", pageNum))
+		pageJSON, err := json.MarshalIndent(respData, "", "  ")
+		require.NoError(t, err)
+		err = os.WriteFile(pagePath, pageJSON, 0644)
+		require.NoError(t, err)
+		t.Logf("第%d页原始JSON结果已保存到: %s", pageNum, pagePath)
+
+		results.Pages = append(results.Pages, respData)
+		if pageNum == 1 {
+			results.TotalCount = respData.TotalCount
 		}
+
+		t.Logf("第%d页查询结果: 总数=%d, 返回=%d份简历, 下一页游标=%d",
+			pageNum, respData.TotalCount, len(respData.Resumes), respData.NextCursor)
+
+		for i, resume := range respData.Resumes {
+			t.Logf("  第%d页简历 #%d: UUID=%s, 块数=%d",
+				pageNum, i+1, resume.SubmissionUUID, len(resume.Chunks))
+		}
+
+		// 如果没有更多结果或到达最后一页，则中断
+		if respData.NextCursor == currentCursor || len(respData.Resumes) < displayLimit {
+			t.Logf("在第%d页到达结果的最后一页。", pageNum)
+			break
+		}
+
+		currentCursor = respData.NextCursor
+		// 增加短暂的延迟以避免在非常快的测试执行中出现竞争条件
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	// 10. 如果是使用生成的测试数据，清理
-	if false {
-		cacheKey := fmt.Sprintf("search_session:%s", testJobID)
-		_, err = s.Redis.Client.Del(ctx, cacheKey).Result()
-		if err != nil && err != redis.Nil {
-			t.Logf("清理缓存时出错: %v", err)
-		}
-	}
+	// 将合并结果保存到JSON文件
+	resultsJSON, err := json.MarshalIndent(results, "", "  ")
+	require.NoError(t, err, "序列化合并结果为JSON失败")
+
+	combinedPath := filepath.Join(currentDir, "paginated_resume_combined.json")
+	err = os.WriteFile(combinedPath, resultsJSON, 0644)
+	require.NoError(t, err, "保存合并结果到JSON文件失败")
+	t.Logf("已将%d页的合并结果保存到: %s", len(results.Pages), combinedPath)
 }

@@ -1,0 +1,425 @@
+{
+  "job_id": "job-pagination-test-002",
+  "cursor": 20,
+  "next_cursor": 30,
+  "size": 10,
+  "total_count": 119,
+  "resumes": [
+    {
+      "submission_uuid": "019750be-5065-7bd0-9b26-406d4c017c0b",
+      "original_filename": "黑白整齐简历模板 (8).pdf",
+      "candidate_name": "周航航",
+      "highest_education": "本科",
+      "years_of_exp": 0.8,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": true,
+      "basic_info": {
+        "education_level": "本科",
+        "email": "2603167476@qq.com",
+        "github": "https://github.com/LEFTX1",
+        "has_intern": "true",
+        "highest_education": "本科",
+        "is_211": "true",
+        "is_double_top": "true",
+        "job_intention": "服务端实习生",
+        "location": "北京-天津-上海-深圳",
+        "name": "周航航",
+        "phone": "18822157735",
+        "position": "服务端实习生",
+        "resume_score": "90",
+        "tags": "在读,服务端实习生,LLM,Golang,双一流,多语言支持,高并发,微服务",
+        "years_of_experience": "0.8"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "周航航\n18822157735 2603167476@qq.com https://github.com/LEFTX1\n在读 意向职位：服务端实习生 北京-天津-上海-深圳"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "EDUCATION",
+          "chunk_title": "教育经历",
+          "content_text": "天津工业大学 (双一流) 计算机科学与技术 本科 2022-09 ~ 至今"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "SKILLS",
+          "chunk_title": "专业技能",
+          "content_text": "| 熟悉计算机网络 (HTTP/TCP), 常见数据结构与算法。熟悉Prompt 工程；理解并实践 LLM Function Calling 工具编写，MCP服务开发；阅读过 OpenMensus 源码，理解并实践基于 ReAct 模式的 Agent 开发；掌握 RAG 知识库构建和常见优化手段；熟悉向量数据库应用。\n| 熟悉 Golang，深入理解并发模型: Goroutine/Channel/Context, GMP调度, 内存管理/GC; 熟悉 Gin/Go-Zero/Kratos/GORM/eino 等框架，掌握LLM应用开发; 熟悉 Go 开发规范，实践过单例、函数选项、外观、装饰器等设计模式，能利用 DeepWiki/Cursor 等工具快速阅读与理解源码。了解 Java 基础，掌握 Spring Boot / Spring AI 框架基础开发。\n| 熟悉 MySQL，理解 InnoDB: B+Tree, ACID, MVCC 相关实现原理; 具有分库分表经验。\n| 熟悉 Redis，理解其核心数据结构, 持久化 RDB/AOF, 高可用 哨兵/Cluster 实现原理; 熟悉缓存设计模式: 防穿透/雪崩/击穿, 分布式锁 RedLock 原理。熟悉 MinIO 对象存储应用。\n| 了解 Kafka，理解其核心架构 Broker/Topic/Partition/CG, 消息生产/消费模型, Offset管理, 副本机制 Leader，Follower; 系统解耦, 异步通信。了解 RabbitMQ 核心架构及消息模型。\n| 了解 Docker 容器化技术，能够编写 Dockerfile 实现应用打包与部署。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "PROJECTS",
+          "chunk_title": "项目经历",
+          "content_text": "LLM驱动的智能简历分析与匹配平台 (ATS) 2025-04 ~ 至今\neino+Hertz+Qdrant+RabbitMQ+MinIO+MySQL+Redis+Docker https://github.com/LEFTX1/GoATS-LLM\n项目介绍：为辅助企业HR应对海量简历挑战，主导设计并研发了LLM驱动的简历智能ATS平台，提供自动化简历解析、智能岗位匹配及语义化候选人检索等核心功能，旨在大幅提升筛选效率与匹配精准度。\n| 上传链路：MIME 嗅探并限大小，SHA-256 + Redis Set 去重，MQ 传元数据解耦，防大文件聚集与 OOM。\n| 语义人才库： LLM Few-shot切分 + Embedding 批量 Upsert Qdrant，向量库支撑 RAG 检索与匹配。\n| LLM 韧性： 装饰器注入令牌桶限流 + 指数退避，平滑突发流量，避免 QPM 超限与重试风暴。\n| 幂等保障： 状态短路 + MySQL唯一键 + Qdrant 唯一id Upsert三重防线，重投只记一次计费/存储。\n\nGo-Link 2024-11 ~ 2025-03\ngo-zero+mysql+redis+etcd+Kafka https://github.com/LEFTX1/shorterurl\n项目介绍：为提升内部营销(短信/App Push)活动效果与追踪，主导/参与构建了短链接服务平台，提供链接创建、管理、高性能跳转及点击统计分析。\n| 灵活 ID：租户初始化自选 雪花/随机/MurmurHash，按顺序性⇄空间⇄延迟权衡，API P50 11→6 ms（P99 16→10 ms）。\n| 异步统计： Goroutine+Kafka异步化跳转统计，消费者批量写库，跳转接口性能仅依赖Redis (~1.5ms)。\n| 高可用读： 布隆过滤拦无效请求 + 空值缓存防穿透 + Singleflight防热点击，显著削减DB负载。\n| 数据分片： 核心表按CRC32哈希分16片，实现千万级数据高效存储与查询。"
+        },
+        {
+          "chunk_id": 5,
+          "chunk_type": "PORTFOLIO",
+          "chunk_title": "GitHub 项目",
+          "content_text": "https://github.com/LEFTX1\nhttps://github.com/LEFTX1/GoATS-LLM\nhttps://github.com/LEFTX1/shorterurl"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000008",
+      "original_filename": "铁扇公主_Go_ORM.pdf",
+      "candidate_name": "铁扇公主",
+      "highest_education": "未知",
+      "years_of_exp": 7,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "tieshan.go@example.com",
+        "name": "铁扇公主",
+        "phone": "13811110008",
+        "tags": "Go,数据库,GORM,SQL优化,分库分表",
+        "years_of_experience": "7"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "铁扇公主 | Senior Go Database Engineer | 13811110008"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。精通GORM，并向其社区贡献过代码。精通MySQL，能通过explain分析并优化慢查询。熟悉分库分表方案。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "数据访问层统一组件\n职责: 负责封装公司统一的数据库访问组件。基于GORM，提供了自动化的分库分表路由、读写分离、慢查询监控等功能。该组件被所有Go业务线使用。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000057",
+      "original_filename": "杏仙子_Android.pdf",
+      "candidate_name": "杏仙子",
+      "highest_education": "未知",
+      "years_of_exp": 4,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "xing.xianzi.android@example.com",
+        "name": "杏仙子",
+        "phone": "13911110057",
+        "tags": "Android,Kotlin,Java,gRPC",
+        "years_of_experience": "4"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "杏仙子 | Android Developer | 13911110057"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "负责公司App的Android端开发。使用gRPC-java库，与后端Go服务进行高性能通信，后端提供了Protobuf文件。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000010",
+      "original_filename": "银角大王_监控.pdf",
+      "candidate_name": "银角大王",
+      "highest_education": "未知",
+      "years_of_exp": 7,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "yinjiao.go@example.com",
+        "name": "银角大王",
+        "phone": "13611110010",
+        "tags": "Go,可观测性,Prometheus,OpenTelemetry,日志",
+        "years_of_experience": "7"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "银角大王 | Go Observability Engineer | 13611110010"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go。熟悉Prometheus和Exporter开发。熟悉OpenTelemetry标准和Jaeger。熟悉ELK/EFK日志栈。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "统一可观测性平台\n职责: 负责为公司所有Go微服务提供统一的可观测性解决方案。开发了通用的Go日志库。基于OpenTelemetry为gRPC和Gin框架编写了中间件，实现了自动化的链路追踪。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000004",
+      "original_filename": "唐三藏_TechLead.pdf",
+      "candidate_name": "唐三藏",
+      "highest_education": "未知",
+      "years_of_exp": 12,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "tang.sanzang.go@example.com",
+        "name": "唐三藏",
+        "phone": "13611110004",
+        "tags": "Go,技术负责人,架构,团队管理",
+        "years_of_experience": "12"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "唐三藏 | Go Tech Lead | 13611110004"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "Go, gRPC, K8s, 技术规划，人员培养。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "带领一个20人的Go后端团队。负责制定技术路线图，推动关键技术项目（如服务网格引入）。进行Code Review和技术分享，提升团队整体水平。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197f6b2-d001-e001-f001-000000000004",
+      "original_filename": "赵子明_LLM_Platform.pdf",
+      "candidate_name": "赵子明",
+      "highest_education": "未知",
+      "years_of_exp": 8,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "zhao.ziming.ai@example.com",
+        "name": "赵子明",
+        "phone": "18610140004",
+        "tags": "LLM平台,Go,Python,高可用,成本控制",
+        "years_of_experience": "8"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "赵子明 | LLM Platform Engineer | 18610140004"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Go和Python。熟悉K8s。对API网关、负载均衡、认证鉴权有深入实践。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "企业级LLM中台\n职责: 负责统一的LLM API网关开发。对内封装了OpenAI, Azure, Claude等多种模型源，提供统一接口。实现了请求路由、API Key管理、用量统计和成本控制。通过缓存和请求合并，显著降低了调用成本和延迟。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000049",
+      "original_filename": "灵感大王_Java架构.pdf",
+      "candidate_name": "灵感大王",
+      "highest_education": "未知",
+      "years_of_exp": 10,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "linggan.dawang.java@example.com",
+        "name": "灵感大王",
+        "phone": "13811110049",
+        "tags": "Java,Spring Cloud,微服务,分布式",
+        "years_of_experience": "10"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "灵感大王 | Java Architect | 13811110049"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "精通Java, Spring Cloud, Dubbo。熟悉分布式系统理论。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "负责公司Java微服务体系。在项目中，我们的一些基础服务（如配置中心）是Go语言编写的，我们的Java服务通过API与其交互。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000030",
+      "original_filename": "虎力大仙_Go.pdf",
+      "candidate_name": "虎力大仙",
+      "highest_education": "未知",
+      "years_of_exp": 5,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "huli.daxian.go@example.com",
+        "name": "虎力大仙",
+        "phone": "13611110030",
+        "tags": "Go,后端,业务系统,中台",
+        "years_of_experience": "5"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "虎力大仙 | Go Developer | 13611110030"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "熟悉Go, Gin。熟悉DDD领域驱动设计的思想。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "用户中台\n职责: 负责用户中台的开发，为各业务线提供统一的用户信息、账户、等级等服务。在开发中尝试运用DDD的思想进行领域建模。"
+        },
+        {
+          "chunk_id": 4,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "某科技有限公司 | 软件工程师 (2-3年)\n职责: 负责公司核心SaaS产品的后端API开发与维护。参与需求评审和技术方案设计，并独立完成多个功能模块。通过性能优化，将负责模块的API响应时间降低了30%。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197i9e2-d001-e001-f001-000000000001",
+      "original_filename": "袁浩_Java架构师.pdf",
+      "candidate_name": "袁浩",
+      "highest_education": "未知",
+      "years_of_exp": 10,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "yuan.hao.java@example.com",
+        "name": "袁浩",
+        "phone": "13810510001",
+        "tags": "Java,架构师,Spring Cloud,分布式,Kafka,高并发",
+        "years_of_experience": "10"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "袁浩 | Java Architect | 13810510001"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "核心技能",
+          "content_text": "精通Java，深入理解JVM原理和性能调优。精通Spring Cloud Alibaba, Dubbo。精通Kafka, RabbitMQ消息中间件。熟悉Sharding-JDBC分库分表。熟悉分布式事务解决方案（Seata）。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "大型电商交易中台 (架构师)\n职责: 负责交易系统的整体架构设计。使用Spring Cloud Alibaba构建微服务，通过Kafka处理订单、支付等异步消息，保证系统削峰填谷。使用Sharding-Sphere实现订单库的水平拆分，支撑每日千万级订单量。"
+        }
+      ]
+    },
+    {
+      "submission_uuid": "0197m3h2-d001-e001-f001-000000000031",
+      "original_filename": "鹿力大仙_Go.pdf",
+      "candidate_name": "鹿力大仙",
+      "highest_education": "未知",
+      "years_of_exp": 3,
+      "is_211": false,
+      "is_985": false,
+      "is_double_top": false,
+      "basic_info": {
+        "email": "luli.daxian.go@example.com",
+        "name": "鹿力大仙",
+        "phone": "13511110031",
+        "tags": "Go,后端,Gin",
+        "years_of_experience": "3"
+      },
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "chunk_type": "BASIC_INFO",
+          "chunk_title": "基本信息",
+          "content_text": "鹿力大仙 | Go Developer | 13511110031"
+        },
+        {
+          "chunk_id": 2,
+          "chunk_type": "SKILLS",
+          "chunk_title": "技能",
+          "content_text": "熟悉Go语言和Gin框架。会使用MySQL。"
+        },
+        {
+          "chunk_id": 3,
+          "chunk_type": "WORK_EXPERIENCE",
+          "chunk_title": "工作经验",
+          "content_text": "在导师的指导下，负责开发后台管理系统的一些API接口。"
+        }
+      ]
+    }
+  ]
+}

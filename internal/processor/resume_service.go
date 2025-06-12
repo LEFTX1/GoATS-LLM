@@ -454,47 +454,38 @@ func (rs *resumeServiceImpl) ProcessLLMTasks(ctx context.Context, message storag
 	// 使用事务来保证读取-更新的原子性和幂等性
 	err := rs.components.Storage.MySQL.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. 获取最新的 ResumeSubmission 记录并锁定，防止并发处理
-		ctx, txSpan := tracer.Start(ctx, "GetAndLockSubmission")
-		defer txSpan.End()
 		var submission models.ResumeSubmission
-		if err := tx.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("submission_uuid = ?", message.SubmissionUUID).
 			First(&submission).Error; err != nil {
 
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				log.Info().Msg("ResumeSubmission记录未找到，可能已被删除")
-				txSpan.SetStatus(codes.Error, "记录不存在")
-				return nil // 记录不存在，可能已被删除，直接确认消息
+				log.Debug().Msg("ResumeSubmission 记录未找到，跳过处理")
+				return nil
 			}
-			log.Error().Err(err).Msg("获取ResumeSubmission记录失败")
-			txSpan.RecordError(err)
-			txSpan.SetStatus(codes.Error, "查询失败")
-			return fmt.Errorf("获取ResumeSubmission记录失败: %w", err)
+			log.Error().Err(err).Msg("获取 ResumeSubmission 记录失败")
+			return err
 		}
 
-		// 2. 幂等性检查 - 使用常量集替代内联的状态检查
+		// 2. 关键的幂等性检查 - 只处理特定状态的记录
 		if !constants.IsStatusAllowed(submission.ProcessingStatus, constants.AllowedStatusesForLLM) {
-			log.Debug().Str("current_status", submission.ProcessingStatus).Msg("跳过重复/无效状态的消息")
-			span.SetAttributes(
-				attribute.String("skipped_reason", "invalid_status"),
-				attribute.String("current_status", submission.ProcessingStatus),
-			)
-			return nil // 状态不匹配，说明是重复消息或已处理，直接确认并返回
+			log.Debug().Str("current_status", submission.ProcessingStatus).Msg("状态不允许进行LLM处理，跳过消息")
+			return nil
 		}
 
-		// 3. 更新状态为 PENDING_LLM，表示开始处理
-		if err := tx.WithContext(ctx).Model(&submission).Update("processing_status", constants.StatusPendingLLM).Error; err != nil {
-			log.Error().Err(err).Msg("更新状态到PENDING_LLM失败")
+		// 3. 更新状态为处理中
+		if err := tx.Model(&submission).Update("processing_status", constants.StatusPendingLLM).Error; err != nil {
+			log.Error().Err(err).Msg("更新状态为PENDING_LLM失败")
 			return fmt.Errorf("更新状态失败: %w", err)
 		}
 
-		return nil // 事务成功提交
+		return nil
 	})
 
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "事务处理失败")
-		return err // 直接返回错误
+		span.SetStatus(codes.Error, "事务初始化失败")
+		return err
 	}
 
 	// --- 事务外执行IO操作 (下载文本，LLM分块，向量化，写入Qdrant) ---
@@ -567,7 +558,9 @@ func (rs *resumeServiceImpl) ProcessLLMTasks(ctx context.Context, message storag
 	// 使用事务来保证最终的数据库更新
 	ctx, finalTxSpan := tracer.Start(ctx, "ExecuteFinalTransaction")
 	defer finalTxSpan.End()
+
 	err = rs.components.Storage.MySQL.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 在事务中执行LLM处理的最终步骤
 		return rs.executeLLMProcessingTransaction(ctx, tx, message, qdrantChunks, floatEmbeddings, sections, basicInfo, parsedText, pointIDs)
 	})
 
@@ -584,7 +577,7 @@ func (rs *resumeServiceImpl) ProcessLLMTasks(ctx context.Context, message storag
 	}
 
 	span.SetStatus(codes.Ok, "处理成功")
-	log.Info().Msg("LLM任务处理成功完成")
+	log.Info().Msg("LLM处理成功完成")
 	return nil
 }
 
@@ -693,24 +686,59 @@ func (rs *resumeServiceImpl) prepareQdrantData(submissionUUID string, sections [
 		Email: basicInfo["email"],
 	}
 
-	// 提取基本信息中的元数据
-	metadata := types.ChunkMetadata{
-		ExperienceYears: parseExperienceYears(basicInfo["years_of_experience"]),
-		EducationLevel:  basicInfo["highest_education"],
+	// 使用新的ChunkMetadata类型（map[string]interface{}）
+	metadata := make(types.ChunkMetadata)
+
+	// 添加经验和教育相关信息
+	if expStr, ok := basicInfo["years_of_experience"]; ok && expStr != "" {
+		if expFloat, err := strconv.ParseFloat(expStr, 32); err == nil {
+			metadata["years_of_experience"] = float32(expFloat)
+		}
+	}
+	if edu, ok := basicInfo["highest_education"]; ok && edu != "" {
+		metadata["highest_education"] = edu
 	}
 
-	// 为每个分块创建Qdrant条目
+	// 添加学校相关布尔值
+	if basicInfo["is_211"] == "true" {
+		metadata["is_211"] = true
+	}
+	if basicInfo["is_985"] == "true" {
+		metadata["is_985"] = true
+	}
+	if basicInfo["is_double_top"] == "true" {
+		metadata["is_double_top"] = true
+	}
+
+	// 添加经验相关布尔值
+	if basicInfo["has_intern"] == "true" || basicInfo["has_intern_exp"] == "true" {
+		metadata["has_intern_exp"] = true
+	}
+	if basicInfo["has_work_exp"] == "true" {
+		metadata["has_work_exp"] = true
+	}
+
+	// 添加奖项相关布尔值
+	if basicInfo["has_algorithm_award"] == "true" {
+		metadata["has_algorithm_award"] = true
+	}
+	if basicInfo["has_programming_competition_award"] == "true" {
+		metadata["has_programming_competition_award"] = true
+	}
+
+	// 遍历所有向量
 	for _, embedding := range chunkEmbeddings {
 		if embedding.Section == nil || len(embedding.Vector) == 0 {
 			log.Warn().Msg("跳过无效的嵌入向量")
 			continue
 		}
 
-		// 跳过BASIC_INFO类型的分块，不存储到向量数据库
-		if embedding.Section.Type == types.SectionBasicInfo {
+		// 使用全局的AllowedVectorTypes白名单来过滤
+		if !types.AllowedVectorTypes[embedding.Section.Type] {
 			log.Debug().
 				Int("chunk_id", embedding.Section.ChunkID).
-				Msg("跳过BASIC_INFO分块，不存入向量数据库")
+				Str("chunk_type", string(embedding.Section.Type)).
+				Msg("跳过非核心分块类型，不存入向量数据库")
 			continue
 		}
 
@@ -722,6 +750,9 @@ func (rs *resumeServiceImpl) prepareQdrantData(submissionUUID string, sections [
 			ImportanceScore:   1.0, // 默认重要性分数
 			UniqueIdentifiers: identifiers,
 			Metadata:          metadata,
+			ChunkTitle:        embedding.Section.Title,
+			Type:              embedding.Section.Type,
+			Title:             embedding.Section.Title,
 		}
 
 		qdrantChunks = append(qdrantChunks, chunk)
@@ -729,12 +760,9 @@ func (rs *resumeServiceImpl) prepareQdrantData(submissionUUID string, sections [
 	}
 
 	if len(qdrantChunks) == 0 {
-		log.Warn().Msg("过滤BASIC_INFO后没有可存储的分块")
+		log.Warn().Msg("过滤后没有任何符合核心分块类型的内容可存入向量数据库")
 	} else {
-		log.Debug().
-			Int("chunks_count", len(qdrantChunks)).
-			Int("embeddings_count", len(floatEmbeddings)).
-			Msg("成功准备Qdrant数据")
+		log.Debug().Int("valid_chunks", len(qdrantChunks)).Msg("准备好的Qdrant数据")
 	}
 
 	return qdrantChunks, floatEmbeddings, nil
@@ -768,46 +796,72 @@ func (rs *resumeServiceImpl) executeLLMProcessingTransaction(
 	parsedText string,
 	pointIDs []string,
 ) error {
-	logger := rs.logger.With().
+	log := rs.logger.With().
 		Str("submission_uuid", message.SubmissionUUID).
 		Str("method", "executeLLMProcessingTransaction").
 		Logger()
 
-	// 1. 保存分块到MySQL
+	// 0. 准备最终的数据库更新
+	updates := rs.prepareFinalDBUpdates(basicInfo, pointIDs)
+	updates["processing_status"] = constants.StatusProcessingCompleted
+
+	log.Debug().
+		Int("sections_total", len(sections)).
+		Int("qdrant_chunks", len(qdrantChunks)).
+		Int("vector_points", len(pointIDs)).
+		Msg("准备执行最终数据库操作")
+
+	// 1. 查找或创建候选人
+	var candidateID string
+	if basicInfo != nil {
+		email := basicInfo["email"]
+		phone := basicInfo["phone"]
+
+		// 确保至少有一个联系方式
+		if email != "" || phone != "" {
+			candidate, err := rs.components.Storage.MySQL.FindOrCreateCandidate(ctx, tx, basicInfo)
+			if err != nil {
+				log.Error().Err(err).Msg("查找或创建候选人失败")
+				return fmt.Errorf("查找或创建候选人失败: %w", err)
+			}
+			if candidate != nil {
+				candidateID = candidate.CandidateID
+				if candidateID != "" {
+					updates["candidate_id"] = candidateID
+					log.Debug().Str("candidate_id", candidateID).Msg("关联了候选人")
+				}
+			}
+		}
+	}
+
+	// 2. 保存简历分块到MySQL - 所有分块都入库，但只有核心分块可能有pointID
 	if err := rs.components.Storage.MySQL.SaveResumeChunks(tx, message.SubmissionUUID, sections, pointIDs); err != nil {
-		logger.Error().Err(err).Msg("保存简历分块到MySQL失败")
-		return fmt.Errorf("保存分块失败: %w", err)
+		log.Error().Err(err).Msg("保存简历分块到MySQL失败")
+		return fmt.Errorf("保存简历分块到MySQL失败: %w", err)
 	}
+	log.Debug().
+		Int("sections_saved", len(sections)).
+		Int("vector_points", len(pointIDs)).
+		Msg("成功保存所有分块到MySQL，只有核心分块（技能、项目、工作经历等）写入了向量数据库")
 
-	// 2. 保存基本信息到MySQL
-	if err := rs.components.Storage.MySQL.SaveResumeBasicInfo(tx, message.SubmissionUUID, basicInfo); err != nil {
-		logger.Error().Err(err).Msg("保存基本信息到MySQL失败")
-		return fmt.Errorf("保存基本信息失败: %w", err)
+	// 3. 更新ResumeSubmission记录
+	if err := rs.components.Storage.MySQL.UpdateResumeSubmissionFields(tx, message.SubmissionUUID, updates); err != nil {
+		log.Error().Err(err).Msg("更新简历提交记录失败")
+		return fmt.Errorf("更新简历提交记录失败: %w", err)
 	}
+	log.Debug().Msg("更新简历提交记录成功")
 
-	// 3. 如果有目标岗位ID，则保存评估结果
+	// 4. 如果有指定目标岗位，执行匹配评估并保存结果
 	if message.TargetJobID != "" {
 		if err := rs.saveMatchEvaluation(ctx, tx, message, parsedText); err != nil {
-			logger.Error().Err(err).Str("target_job_id", message.TargetJobID).Msg("保存匹配评估失败")
-			// 继续处理，不因为评估失败而中断整个流程
+			// 匹配评估失败不阻止整体流程
+			log.Warn().Err(err).Str("job_id", message.TargetJobID).
+				Msg("保存匹配评估失败，但继续处理")
+		} else {
+			log.Debug().Str("job_id", message.TargetJobID).Msg("保存匹配评估成功")
 		}
-	} else {
-		logger.Debug().Msg("没有目标岗位ID，跳过匹配评估")
 	}
 
-	// 4. 准备最终更新
-	// 把重要信息编码为JSON，以便在Dashboard UI中展示
-	updates := rs.prepareFinalDBUpdates(basicInfo, pointIDs)
-
-	// 5. 更新最终状态
-	if err := tx.Model(&models.ResumeSubmission{}).
-		Where("submission_uuid = ?", message.SubmissionUUID).
-		Updates(updates).Error; err != nil {
-		logger.Error().Err(err).Msg("更新最终状态到MySQL失败")
-		return fmt.Errorf("更新最终状态失败: %w", err)
-	}
-
-	logger.Debug().Msg("成功执行LLM处理事务")
 	return nil
 }
 

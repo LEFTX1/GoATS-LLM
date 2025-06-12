@@ -17,6 +17,18 @@ create table if not exists llm_ats.candidates
         unique (primary_phone)
 );
 
+create table if not exists llm_ats.hrs
+(
+    hr_id      char(36)                                 not null
+        primary key,
+    name       varchar(255)                             not null,
+    email      varchar(255)                             not null,
+    created_at datetime(6) default CURRENT_TIMESTAMP(6) null,
+    updated_at datetime(6) default CURRENT_TIMESTAMP(6) null,
+    constraint uni_hrs_email
+        unique (email)
+);
+
 create table if not exists llm_ats.interview_evaluations
 (
     evaluation_id          bigint unsigned auto_increment
@@ -198,6 +210,16 @@ create table if not exists llm_ats.resume_submissions
     parser_version         varchar(50)                              null,
     created_at             datetime(6) default CURRENT_TIMESTAMP(6) null,
     updated_at             datetime(6) default CURRENT_TIMESTAMP(6) null,
+    is_211                 tinyint(1)  default 0                    null,
+    is_985                 tinyint(1)  default 0                    null,
+    is_double_top          tinyint(1)  default 0                    null,
+    has_intern_exp         tinyint(1)  default 0                    null,
+    has_work_exp           tinyint(1)  default 0                    null,
+    highest_education      varchar(20)                              null,
+    years_of_exp           decimal(3, 1)                            null,
+    has_algo_award         tinyint(1)  default 0                    null,
+    has_prog_award         tinyint(1)  default 0                    null,
+    meta_extra             json                                     null,
     constraint idx_rs_similarity_hash
         unique (similarity_hash)
 );
@@ -236,21 +258,4 @@ create table if not exists llm_ats.reviewed_resumes
     constraint uq_reviewed_job_hr_text_md5
         unique (job_id, hr_id, text_md5)
 );
-
--- 新增 HR 表，用于功能 MVP
-create table if not exists llm_ats.hrs
-(
-    hr_id      char(36)                                 not null
-        primary key,
-    name       varchar(255)                             not null,
-    email      varchar(255)                             not null,
-    created_at datetime(6) default CURRENT_TIMESTAMP(6) null,
-    updated_at datetime(6) default CURRENT_TIMESTAMP(6) null,
-    constraint uni_hrs_email
-        unique (email)
-);
-
--- 用于功能测试的示例 HR 数据
--- INSERT INTO llm_ats.hrs (hr_id, name, email, created_at, updated_at)
--- VALUES ('11111111-1111-1111-1111-111111111111', 'MVP HR', 'hr.mvp@example.com', NOW(), NOW());
 

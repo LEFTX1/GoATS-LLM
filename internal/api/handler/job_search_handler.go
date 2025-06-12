@@ -8,20 +8,25 @@ import (
 	"ai-agent-go/internal/storage/models"
 	"ai-agent-go/internal/types"
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -76,9 +81,9 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 
 	h.logger.Printf("开始处理 JobID: %s 的简历搜索请求, HR: %s, Limit: %d, Cursor: %d", jobID, hrID, displayLimit, cursor)
 
-	// 2. 生成唯一的、可复现的搜索会话ID和锁ID
-	searchID := fmt.Sprintf("search_session:%s", jobID)
-	lockKey := fmt.Sprintf("search_lock:%s", jobID)
+	// 2. 生成唯一的、可复现的搜索会话ID和锁ID，添加HR维度
+	searchID := fmt.Sprintf(constants.KeySearchSession, jobID, hrID)
+	lockKey := fmt.Sprintf(constants.KeySearchLock, jobID, hrID)
 
 	// 3. 检查缓存
 	// 尝试从Redis缓存中获取"黄金结果集"的分页数据
@@ -147,7 +152,7 @@ func (h *JobSearchHandler) HandleSearchResumesByJobID(ctx context.Context, c *ap
 		}
 
 		// 将"黄金结果集"写入缓存
-		err = h.storage.Redis.CacheSearchResults(ctx, searchID, finalRankedSubmissions, 30*time.Minute)
+		err = h.storeResultsInCache(ctx, searchID, finalRankedSubmissions)
 		if err != nil {
 			// 只记录日志，不阻塞主流程
 			h.logger.Printf("缓存黄金结果集失败 for searchID %s: %v", searchID, err)
@@ -246,7 +251,7 @@ func (h *JobSearchHandler) fetchResumeDetailsByUUIDs(ctx context.Context, uuids 
 // getJobDescription 辅助函数，用于获取岗位描述文本。
 // 首先尝试从 Redis 缓存获取，如果缓存未命中，则从 MySQL 数据库查询，并回填缓存。
 func (h *JobSearchHandler) getJobDescription(ctx context.Context, jobID string) (string, error) {
-	cacheKey := fmt.Sprintf("%s%s", constants.JobDescriptionTextCachePrefix, jobID)
+	cacheKey := fmt.Sprintf(constants.KeyJobDescriptionText, jobID)
 
 	// 1. 尝试从 Redis 缓存获取 JD 文本
 	cachedJD, err := h.storage.Redis.Get(ctx, cacheKey)
@@ -339,17 +344,124 @@ func (h *JobSearchHandler) HandleGetJobDescription(ctx context.Context, c *app.R
 	})
 }
 
+// 用于高效获取TopK的最小堆
+type MinHeap struct {
+	values []float32
+}
+
+// Len 实现heap.Interface的Len()方法
+func (h MinHeap) Len() int { return len(h.values) }
+
+// Less 实现heap.Interface的Less()方法
+func (h MinHeap) Less(i, j int) bool { return h.values[i] < h.values[j] }
+
+// Swap 实现heap.Interface的Swap()方法
+func (h MinHeap) Swap(i, j int) { h.values[i], h.values[j] = h.values[j], h.values[i] }
+
+// Push 实现heap.Interface的Push()方法
+func (h *MinHeap) Push(x interface{}) {
+	h.values = append(h.values, x.(float32))
+}
+
+// Pop 实现heap.Interface的Pop()方法
+func (h *MinHeap) Pop() interface{} {
+	old := h.values
+	n := len(old)
+	x := old[n-1]
+	h.values = old[0 : n-1]
+	return x
+}
+
+// GetTopKSum 获取切片中最大的k个元素之和，不修改原切片
+// 导出此函数，以便基准测试和扩展使用
+func GetTopKSum(scores []float32, k int) (float32, int) {
+	if len(scores) == 0 {
+		return 0, 0
+	}
+
+	kk := k
+	if len(scores) < k {
+		kk = len(scores)
+	}
+
+	// 使用最小堆获取TopK
+	h := &MinHeap{values: make([]float32, 0, kk)}
+
+	// 首先填充k个元素
+	for i := 0; i < len(scores) && i < kk; i++ {
+		heap.Push(h, scores[i])
+	}
+
+	// 替换较小的元素
+	for i := kk; i < len(scores); i++ {
+		if scores[i] > h.values[0] { // 大于堆顶（最小值）
+			heap.Pop(h)
+			heap.Push(h, scores[i])
+		}
+	}
+
+	// 计算总和
+	var sum float32
+	for _, v := range h.values {
+		sum += v
+	}
+
+	return sum, kk
+}
+
+// ComputeStats 一次遍历计算均值、标准差和覆盖率
+// 导出此函数，以便基准测试和扩展使用
+func ComputeStats(scores []float32, coverTh float32) (mean float64, stdev float64, cover float32) {
+	if len(scores) == 0 {
+		return 0, 0, 0
+	}
+
+	var sum, sqSum float64
+	var coverCount int
+
+	// 一次遍历计算所有统计量
+	for _, s := range scores {
+		sum += float64(s)
+		sqSum += float64(s) * float64(s)
+		if s >= coverTh {
+			coverCount++
+		}
+	}
+
+	n := float64(len(scores))
+	mean = sum / n
+	stdev = sqSum/n - mean*mean // E[X²] - E[X]²
+	if stdev < 0 {              // 避免数值精度问题导致负方差
+		stdev = 0
+	} else {
+		stdev = math.Sqrt(stdev)
+	}
+
+	cover = float32(coverCount) / float32(len(scores))
+	return mean, stdev, cover
+}
+
+// RerankDocument Reranker服务的输入文档结构
+type RerankDocument struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+// RerankRequest Reranker服务的请求结构
+type RerankRequest struct {
+	Query     string           `json:"query"`
+	Documents []RerankDocument `json:"documents"`
+}
+
+// RerankedDocument Reranker服务的输出文档结构
+type RerankedDocument struct {
+	ID          string  `json:"id"`
+	RerankScore float32 `json:"rerank_score"`
+}
+
+// executeFullSearchPipeline 执行完整的搜索流水线
 func (h *JobSearchHandler) executeFullSearchPipeline(ctx context.Context, jobID string, hrID string) ([]types.RankedSubmission, error) {
-	// 记录流程开始及相关参数
-	startTime := time.Now()
-	h.logger.Printf("开始执行完整搜索流程 for JobID: %s, HR: %s", jobID, hrID)
-
-	// 1. 定义固定召回和过滤参数
-	const internalRecallLimit = 300
-	const scoreThreshold = 0.50
-	const rerankTopN = 150 // 仅对向量搜索分数最高的前150名进行重排
-
-	// 2. 获取JD文本和向量
+	// 1. 获取JD文本和向量
 	jdText, err := h.getJobDescription(ctx, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("获取JD失败: %w", err)
@@ -358,141 +470,373 @@ func (h *JobSearchHandler) executeFullSearchPipeline(ctx context.Context, jobID 
 	if err != nil {
 		return nil, fmt.Errorf("获取JD向量失败: %w", err)
 	}
-	h.logger.Printf("成功获取JD向量 for JobID: %s", jobID)
 
-	// 3. Qdrant向量召回
-	initialResults, err := h.storage.Qdrant.SearchSimilarResumes(ctx, jdVector, internalRecallLimit, nil)
+	// 2. 向量数据库召回：场景 C.2 用更大的 K
+	const recallLimit = 500
+	initialResults, err := h.storage.Qdrant.SearchSimilarResumes(ctx, jdVector, recallLimit, nil)
 	if err != nil {
-		return nil, fmt.Errorf("Qdrant搜索失败: %w", err)
+		return nil, err
 	}
-	h.logger.Printf("Qdrant召回 %d 个初步结果 for JobID: %s", len(initialResults), jobID)
+	h.logger.Printf("向量召回获得 %d 个初步 chunk", len(initialResults))
 
-	// 4. 海选过滤 (基于向量搜索分数)
-	var candidatesForRerank []storage.SearchResult
+	// 3. 候选人级聚合：每个 submission_uuid 选最高向量分数的 chunk
+	bestPerResume := make(map[string]storage.SearchResult)
 	for _, res := range initialResults {
-		if res.Score >= scoreThreshold {
-			candidatesForRerank = append(candidatesForRerank, res)
+		uuid, _ := res.Payload["submission_uuid"].(string)
+		if uuid == "" {
+			continue
+		}
+		if exist, ok := bestPerResume[uuid]; !ok || res.Score > exist.Score {
+			bestPerResume[uuid] = res
 		}
 	}
-	h.logger.Printf("应用score_threshold=%.2f后, 剩下 %d 个候选结果进入重排", scoreThreshold, len(candidatesForRerank))
-
-	// 5. TODO: 已读过滤 (为第二阶段保留)
-	// unreadCandidates, err := h.storage.Redis.FilterUnreadSubmissions(ctx, hrID, candidatesForRerank)
-	// ...
-
-	// 6. 调用Reranker服务进行精排
-	// 注意：为控制成本和提高效率，仅将TopN结果发送给Reranker
-	rerankCandidates := candidatesForRerank
-	if len(rerankCandidates) > rerankTopN {
-		rerankCandidates = rerankCandidates[:rerankTopN]
+	// 转 slice 并按向量分数降序，截取 Top 120
+	var candidateChunks []storage.SearchResult
+	for _, v := range bestPerResume {
+		candidateChunks = append(candidateChunks, v)
 	}
+	sort.Slice(candidateChunks, func(i, j int) bool {
+		return candidateChunks[i].Score > candidateChunks[j].Score
+	})
+	const candidateTopN = 120
+	if len(candidateChunks) > candidateTopN {
+		candidateChunks = candidateChunks[:candidateTopN]
+	}
+	h.logger.Printf("聚合后，%d 份候选简历（最佳 chunk）进入 Rerank", len(candidateChunks))
 
-	rerankScores, err := h.callReranker(ctx, jdText, rerankCandidates)
+	// 4. 对候选 chunk 批量调用 Reranker
+	rerankScores, err := h.batchReranker(ctx, jdText, candidateChunks)
 	if err != nil {
-		// Reranker失败不应阻塞流程，可以回退到使用向量分数
-		h.logger.Printf("警告: Reranker调用失败: %v。将回退到使用原始向量搜索分数。", err)
-		// 在回退逻辑中，需要聚合原始向量分数
-	} else {
-		h.logger.Printf("Reranker精排完成，返回 %d 个分数", len(rerankScores))
+		h.logger.Printf("Reranker 调用失败，退回向量排序：%v", err)
+		rerankScores = nil // 即使reranker失败，后续也可以只用向量分数
 	}
 
-	// 7. 分数聚合 (Top-K 平均分, "惩罚短板"策略)
-	finalSubmissionScores := h.aggregateScores(candidatesForRerank, rerankScores)
-	h.logger.Printf("使用Top-K聚合策略后，得到 %d 份简历的最终综合得分", len(finalSubmissionScores))
+	// 5. 线性融合 (Min-Max 归一化 + 30% 向量分 + 70% Rerank 分)
+	finalScores := make(map[string]float32, len(candidateChunks))
 
-	// 8. 排序并返回最终的"黄金结果集"
-	var rankedSubmissions []types.RankedSubmission
-	for uuid, score := range finalSubmissionScores {
-		rankedSubmissions = append(rankedSubmissions, types.RankedSubmission{
-			SubmissionUUID: uuid,
-			Score:          score,
+	if rerankScores != nil {
+		// 5.1 先收集两组原始分数
+		vecScores := make([]float32, 0, len(candidateChunks))
+		rerScores := make([]float32, 0, len(candidateChunks))
+		for _, ch := range candidateChunks {
+			if _, ok := rerankScores[ch.ID]; ok {
+				vecScores = append(vecScores, ch.Score)
+				rerScores = append(rerScores, rerankScores[ch.ID])
+			}
+		}
+
+		if len(vecScores) > 0 {
+			// 5.2 找 min/max
+			minMax := func(arr []float32) (min, max float32) {
+				min, max = arr[0], arr[0]
+				for _, v := range arr {
+					if v < min {
+						min = v
+					}
+					if v > max {
+						max = v
+					}
+				}
+				return
+			}
+			minV, maxV := minMax(vecScores)
+			minR, maxR := minMax(rerScores)
+
+			// 5.3 对每个候选人做归一化并融合
+			const wVec, wRer = 0.3, 0.7
+			for _, ch := range candidateChunks {
+				if rerankScore, ok := rerankScores[ch.ID]; ok {
+					normVec := float32(0)
+					if maxV > minV {
+						normVec = (ch.Score - minV) / (maxV - minV)
+					}
+					normR := float32(0)
+					if maxR > minR {
+						normR = (rerankScore - minR) / (maxR - minR)
+					}
+					fused := wVec*normVec + wRer*normR
+					uuid, _ := ch.Payload["submission_uuid"].(string)
+					finalScores[uuid] = fused
+				}
+			}
+		}
+	}
+
+	// 如果 Reranker 失败或没有任何结果，则回退到纯向量分数
+	if len(finalScores) == 0 {
+		h.logger.Printf("融合分数为空，回退到纯向量分数排序")
+		for _, ch := range candidateChunks {
+			uuid, _ := ch.Payload["submission_uuid"].(string)
+			finalScores[uuid] = ch.Score
+		}
+	}
+
+	// 6. 转换、排序、去重
+	var ranked []types.RankedSubmission
+	for uuid, sc := range finalScores {
+		ranked = append(ranked, types.RankedSubmission{SubmissionUUID: uuid, Score: sc})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].Score > ranked[j].Score
+	})
+
+	return h.DeduplicateSubmissions(ctx, ranked)
+}
+
+// storeResultsInCache 将排序结果缓存到Redis
+func (h *JobSearchHandler) storeResultsInCache(ctx context.Context, cacheKey string, results []types.RankedSubmission) error {
+	pipe := h.storage.Redis.Client.Pipeline()
+
+	// 先删除旧缓存
+	pipe.Del(ctx, cacheKey)
+
+	// 批量添加到ZSET
+	for i, r := range results {
+		pipe.ZAdd(ctx, cacheKey, redis.Z{
+			Score:  float64(len(results) - i), // 使用倒序索引作为分数
+			Member: r.SubmissionUUID,
 		})
 	}
 
-	sort.Slice(rankedSubmissions, func(i, j int) bool {
-		return rankedSubmissions[i].Score > rankedSubmissions[j].Score
-	})
+	// 设置过期时间
+	pipe.Expire(ctx, cacheKey, 30*time.Minute)
 
-	// 记录流程结束及耗时
-	h.logger.Printf("完整搜索流程结束 for JobID: %s，耗时: %v，返回 %d 个结果",
-		jobID, time.Since(startTime), len(rankedSubmissions))
-
-	return rankedSubmissions, nil
+	// 执行管道
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
-// callReranker 是一个辅助函数，用于调用外部的Reranker服务
-func (h *JobSearchHandler) callReranker(ctx context.Context, query string, documents []storage.SearchResult) (map[string]float32, error) {
-	rerankerURL := h.cfg.Reranker.URL
-	if !h.cfg.Reranker.Enabled || rerankerURL == "" {
-		h.logger.Println("Reranker未启用或URL未配置，跳过重排序")
-		return nil, nil // Not an error, just skipping
+// DeduplicateSubmissions a new method for JobSearchHandler to deduplicate submissions by candidate
+func (h *JobSearchHandler) DeduplicateSubmissions(ctx context.Context, rankedSubmissions []types.RankedSubmission) ([]types.RankedSubmission, error) {
+	if len(rankedSubmissions) == 0 {
+		return nil, nil
+	}
+	var submissionUUIDs []string
+	for _, sub := range rankedSubmissions {
+		submissionUUIDs = append(submissionUUIDs, sub.SubmissionUUID)
 	}
 
-	type RerankDocument struct {
-		ID   string `json:"id"`
-		Text string `json:"text"`
+	type submissionToCandidate struct {
+		SubmissionUUID string `gorm:"column:submission_uuid"`
+		CandidateID    string `gorm:"column:candidate_id"`
+	}
+	var mappings []submissionToCandidate
+	err := h.storage.MySQL.DB().WithContext(ctx).
+		Table("resume_submissions").
+		Select("submission_uuid", "candidate_id").
+		Where("submission_uuid IN ?", submissionUUIDs).
+		Find(&mappings).Error
+	if err != nil {
+		return nil, fmt.Errorf("查询submission到candidate映射失败: %w", err)
 	}
 
-	type RerankRequest struct {
-		Query     string           `json:"query"`
-		Documents []RerankDocument `json:"documents"`
+	subToCandMap := make(map[string]string)
+	for _, m := range mappings {
+		subToCandMap[m.SubmissionUUID] = m.CandidateID
 	}
 
-	type RerankedDocument struct {
-		ID          string  `json:"id"`
-		RerankScore float32 `json:"rerank_score"`
+	bestSubmissionsForCandidate := make(map[string]types.RankedSubmission)
+	// Iterate through the original ranked submissions to preserve order
+	for _, sub := range rankedSubmissions {
+		candidateID := subToCandMap[sub.SubmissionUUID]
+		if candidateID == "" {
+			// Fallback for safety, though this should ideally not happen
+			candidateID = sub.SubmissionUUID
+		}
+
+		if existing, ok := bestSubmissionsForCandidate[candidateID]; !ok || sub.Score > existing.Score {
+			bestSubmissionsForCandidate[candidateID] = sub
+		}
 	}
 
-	var rerankDocs []RerankDocument
-	for _, doc := range documents {
-		if content, ok := doc.Payload["chunk_content_text"].(string); ok {
-			rerankDocs = append(rerankDocs, RerankDocument{
-				ID:   doc.ID,
+	var finalSubmissions []types.RankedSubmission
+	// The order is lost here, we need to re-sort
+	for _, sub := range bestSubmissionsForCandidate {
+		finalSubmissions = append(finalSubmissions, sub)
+	}
+	sort.Slice(finalSubmissions, func(i, j int) bool {
+		return finalSubmissions[i].Score > finalSubmissions[j].Score
+	})
+
+	return finalSubmissions, nil
+}
+
+// batchReranker 批量处理Reranker请求
+func (h *JobSearchHandler) batchReranker(ctx context.Context, query string, documents []storage.SearchResult) (map[string]float32, error) {
+	// 如果配置禁用了Reranker或没有提供URL，直接返回
+	if !h.cfg.Reranker.Enabled || h.cfg.Reranker.URL == "" {
+		return nil, nil
+	}
+
+	const BatchSize = 100 // 每批次处理的文档数
+
+	// 确定并行工作数量
+	cpuCount := runtime.NumCPU()
+	workerCount := cpuCount * 2
+	if workerCount > 8 {
+		workerCount = 8
+	}
+
+	// 结果和错误通道
+	resultChan := make(chan map[string]float32, workerCount)
+	errChan := make(chan error, workerCount)
+	var wg sync.WaitGroup
+
+	// 将文档分成多个批次
+	var batches [][]storage.SearchResult
+	for i := 0; i < len(documents); i += BatchSize {
+		end := i + BatchSize
+		if end > len(documents) {
+			end = len(documents)
+		}
+		batches = append(batches, documents[i:end])
+	}
+
+	// 批次任务通道
+	batchChan := make(chan []storage.SearchResult, len(batches))
+	for _, batch := range batches {
+		batchChan <- batch
+	}
+	close(batchChan)
+
+	// 启动工作协程
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for batch := range batchChan {
+				scores, err := h.processBatch(ctx, query, batch)
+				if err != nil {
+					select {
+					case errChan <- err:
+					default:
+					}
+					return
+				}
+
+				if scores != nil {
+					select {
+					case resultChan <- scores:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// 等待所有工作完成
+	go func() {
+		wg.Wait()
+		close(resultChan)
+		close(errChan)
+	}()
+
+	// 合并结果
+	mergedScores := make(map[string]float32)
+	for scores := range resultChan {
+		for id, score := range scores {
+			mergedScores[id] = score
+		}
+	}
+
+	// 检查错误
+	select {
+	case err := <-errChan:
+		if err != nil {
+			return nil, err
+		}
+	default:
+	}
+
+	h.logger.Printf("批处理Reranker完成，共处理 %d 批次，获得 %d 个重排分数", len(batches), len(mergedScores))
+	return mergedScores, nil
+}
+
+// processBatch 处理单个批次的Reranker请求
+func (h *JobSearchHandler) processBatch(ctx context.Context, query string, batch []storage.SearchResult) (map[string]float32, error) {
+	// 准备请求文档
+	var docsToRerank []RerankDocument
+
+	for _, res := range batch {
+		// 尝试从多个可能的字段获取内容
+		var content string
+		var found bool
+		possibleFields := []string{"chunk_content_text", "content", "text"}
+
+		for _, field := range possibleFields {
+			if textContent, ok := res.Payload[field].(string); ok && textContent != "" {
+				content = textContent
+				found = true
+				break
+			}
+		}
+
+		// 如果找不到，尝试任意字符串字段
+		if !found {
+			for _, v := range res.Payload {
+				if textContent, ok := v.(string); ok && textContent != "" {
+					content = textContent
+					found = true
+					break
+				}
+			}
+		}
+
+		if found {
+			docsToRerank = append(docsToRerank, RerankDocument{
+				ID:   res.ID,
 				Text: content,
 			})
 		}
 	}
 
-	if len(rerankDocs) == 0 {
-		return nil, nil // No documents to rerank
+	if len(docsToRerank) == 0 {
+		return nil, nil
 	}
 
-	reqBody, err := json.Marshal(RerankRequest{Query: query, Documents: rerankDocs})
-	if err != nil {
-		return nil, fmt.Errorf("序列化rerank请求失败: %w", err)
+	// 构造请求
+	reqBody := RerankRequest{
+		Query:     query,
+		Documents: docsToRerank,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", rerankerURL, bytes.NewBuffer(reqBody))
+	reqBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("创建rerank HTTP请求失败: %w", err)
+		return nil, err
+	}
+
+	// 创建HTTP请求
+	req, err := http.NewRequestWithContext(ctx, "POST", h.cfg.Reranker.URL, bytes.NewBuffer(reqBytes))
+	if err != nil {
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// 使用更健壮的 HTTP client
-	client := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:    10,
-			IdleConnTimeout: 30 * time.Second,
-		},
-		Timeout: 15 * time.Second, // 增加超时
-	}
+	// 设置超时
+	client := &http.Client{Timeout: 30 * time.Second}
 
+	// 发送请求
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("执行rerank请求失败: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
+	// 检查响应状态
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Reranker服务返回非200状态码: %d, 响应: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("Reranker服务返回错误: %d, %s", resp.StatusCode, string(bodyBytes))
 	}
 
+	// 解析响应
 	var rerankedDocs []RerankedDocument
 	if err := json.NewDecoder(resp.Body).Decode(&rerankedDocs); err != nil {
-		return nil, fmt.Errorf("解码rerank响应失败: %w", err)
+		return nil, err
 	}
 
+	// 提取分数
 	rerankScores := make(map[string]float32)
 	for _, doc := range rerankedDocs {
 		rerankScores[doc.ID] = doc.RerankScore
@@ -501,128 +845,64 @@ func (h *JobSearchHandler) callReranker(ctx context.Context, query string, docum
 	return rerankScores, nil
 }
 
-// aggregateScores 是一个辅助函数，用于聚合每个简历的分数
-func (h *JobSearchHandler) aggregateScores(candidates []storage.SearchResult, rerankScores map[string]float32) map[string]float32 {
-	submissionChunkScores := make(map[string][]float32)
-
-	// 如果 Reranker 失败，rerankScores 会是 nil，此时我们使用原始向量分数
-	useVectorScore := rerankScores == nil
-
-	// 收集每个submission的所有 chunk 分数
-	for _, res := range candidates {
-		var score float32
-		var ok bool
-
-		if useVectorScore {
-			score = res.Score
-			ok = true
-		} else {
-			score, ok = rerankScores[res.ID]
-		}
-
-		if ok {
-			uuid, _ := res.Payload["submission_uuid"].(string)
-			if uuid != "" {
-				submissionChunkScores[uuid] = append(submissionChunkScores[uuid], score)
-			}
-		}
-	}
-
-	// 计算Top-K平均分 ("惩罚短板"策略)
-	finalSubmissionScores := make(map[string]float32)
-	const topK = 3
-	for uuid, scores := range submissionChunkScores {
-		// 降序排序
-		sort.Slice(scores, func(i, j int) bool {
-			return scores[i] > scores[j]
-		})
-
-		// 取前K个或所有（如果不足K个）
-		effectiveK := topK
-		if len(scores) < effectiveK {
-			effectiveK = len(scores)
-		}
-
-		var sum float32
-		for i := 0; i < effectiveK; i++ {
-			sum += scores[i]
-		}
-		// 动态分母聚合：避免对短简历进行双重惩罚
-		finalSubmissionScores[uuid] = sum / float32(effectiveK)
-	}
-
-	return finalSubmissionScores
-}
-
-// HandleCheckSearchStatus 处理查询搜索状态的请求
-// GET /api/v1/jobs/:job_id/search/status
+// HandleCheckSearchStatus 处理检查搜索状态的请求
 func (h *JobSearchHandler) HandleCheckSearchStatus(ctx context.Context, c *app.RequestContext) {
-	// 获取请求参数
 	jobID := c.Param("job_id")
-	if jobID == "" {
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "job_id 不能为空"})
-		return
-	}
-
-	// 从认证中间件获取 hr_id（可选，如果需要根据HR筛选结果）
-	_, exists := c.Get("hr_id")
+	hrIDValue, exists := c.Get("hr_id")
 	if !exists {
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "获取 HR ID 失败"})
 		return
 	}
-	// 注：此处暂时不使用hrID，但保持身份验证检查
-	// 未来可以扩展为根据HR筛选或记录特定HR的查询
+	hrID := hrIDValue.(string)
 
-	// 生成相关ID
-	searchID := fmt.Sprintf("search_session:%s", jobID)
-	lockKey := fmt.Sprintf("search_lock:%s", jobID)
+	searchID := fmt.Sprintf(constants.KeySearchSession, jobID, hrID)
+	lockKey := fmt.Sprintf(constants.KeySearchLock, jobID, hrID)
 
-	// 1. 检查是否有缓存结果存在
-	cachedUUIDs, totalCount, err := h.storage.Redis.GetCachedSearchResults(ctx, searchID, 0, 1)
-	if err == nil && len(cachedUUIDs) > 0 {
-		// 缓存已存在，意味着搜索已完成
-		c.JSON(consts.StatusOK, map[string]interface{}{
-			"status":      "completed",
-			"job_id":      jobID,
-			"total_count": totalCount,
-			"message":     "搜索已完成，可以获取结果",
-		})
-		return
-	}
-
-	// 2. 检查是否有锁存在（表示搜索正在进行中）
-	lockExists, err := h.storage.Redis.Client.Exists(ctx, lockKey).Result()
+	// 检查缓存中是否存在结果
+	existsCount, err := h.storage.Redis.Client.Exists(ctx, searchID).Result()
 	if err != nil {
-		h.logger.Printf("检查搜索锁状态失败 for JobID %s: %v", jobID, err)
+		h.logger.Printf("检查 searchID: %s 失败: %v", searchID, err)
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "检查搜索状态失败"})
 		return
 	}
 
-	if lockExists > 0 {
-		// 锁存在，意味着搜索正在进行中
-
-		// 尝试获取锁的剩余过期时间
-		ttl, err := h.storage.Redis.Client.TTL(ctx, lockKey).Result()
+	if existsCount > 0 {
+		// 缓存存在，返回已完成状态
+		totalCount, err := h.storage.Redis.Client.ZCard(ctx, searchID).Result()
 		if err != nil {
-			h.logger.Printf("获取锁TTL失败 for JobID %s: %v", jobID, err)
-			// 不返回错误，继续处理
-			ttl = 0
+			h.logger.Printf("获取缓存元素数量失败: %v", err)
+			c.JSON(consts.StatusInternalServerError, map[string]string{"error": "获取搜索结果数量失败"})
+			return
 		}
 
 		c.JSON(consts.StatusOK, map[string]interface{}{
-			"status":      "processing",
-			"job_id":      jobID,
-			"message":     "您的搜索请求正在处理中，请稍后重试",
-			"retry_after": 2, // 建议客户端2秒后重试
-			"ttl_seconds": int(ttl.Seconds()),
+			"status":      "completed",
+			"total_count": totalCount,
 		})
 		return
 	}
 
-	// 3. 既没有缓存结果，也没有锁，意味着尚未开始搜索或者搜索失败
+	// 检查搜索锁是否存在
+	lockExistsCount, err := h.storage.Redis.Client.Exists(ctx, lockKey).Result()
+	if err != nil {
+		h.logger.Printf("检查搜索锁状态失败: %v", err)
+		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "检查搜索状态失败"})
+		return
+	}
+
+	if lockExistsCount > 0 {
+		// 锁存在，表示搜索正在进行
+		c.JSON(consts.StatusOK, map[string]interface{}{
+			"status":      "processing",
+			"message":     "搜索正在处理中",
+			"retry_after": 2,
+		})
+		return
+	}
+
+	// 既无锁也无缓存，表示尚未开始搜索或者搜索已过期
 	c.JSON(consts.StatusOK, map[string]interface{}{
-		"status":  "not_started",
-		"job_id":  jobID,
-		"message": "搜索尚未开始或之前的搜索已失败，请发起新的搜索请求",
+		"status":  "not_found",
+		"message": "未找到搜索结果或结果已过期",
 	})
 }
