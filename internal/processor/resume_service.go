@@ -347,7 +347,7 @@ func (rs *resumeServiceImpl) ProcessUploadedResume(ctx context.Context, message 
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		// 如果事务执行过程中发生错误，更新状态为失败
-		updateErr := rs.components.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusUploadProcessingFailed)
+		updateErr := rs.updateProcessingStatusWithCache(ctx, message.SubmissionUUID, constants.StatusUploadProcessingFailed)
 		if updateErr != nil {
 			log.Error().Err(updateErr).Msg("更新状态为失败时出错")
 		}
@@ -495,7 +495,7 @@ func (rs *resumeServiceImpl) ProcessLLMTasks(ctx context.Context, message storag
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "下载或分块失败")
-		updateErr := rs.components.Storage.MySQL.UpdateResumeProcessingStatus(
+		updateErr := rs.updateProcessingStatusWithCache(
 			ctx, message.SubmissionUUID, constants.StatusChunkingFailed)
 		if updateErr != nil {
 			log.Error().Err(updateErr).Msg("更新状态为CHUNKING_FAILED失败")
@@ -510,7 +510,7 @@ func (rs *resumeServiceImpl) ProcessLLMTasks(ctx context.Context, message storag
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "向量化失败")
-		updateErr := rs.components.Storage.MySQL.UpdateResumeProcessingStatus(
+		updateErr := rs.updateProcessingStatusWithCache(
 			ctx, message.SubmissionUUID, constants.StatusVectorizationFailed)
 		if updateErr != nil {
 			log.Error().Err(updateErr).Msg("更新状态为VECTORIZATION_FAILED失败")
@@ -541,7 +541,7 @@ func (rs *resumeServiceImpl) ProcessLLMTasks(ctx context.Context, message storag
 			storeSpan.RecordError(err)
 			storeSpan.SetStatus(codes.Error, "存储失败")
 			storeSpan.End()
-			updateErr := rs.components.Storage.MySQL.UpdateResumeProcessingStatus(
+			updateErr := rs.updateProcessingStatusWithCache(
 				ctx, message.SubmissionUUID, constants.StatusQdrantStoreFailed)
 			if updateErr != nil {
 				log.Error().Err(updateErr).Msg("更新状态为QDRANT_STORE_FAILED失败")
@@ -568,7 +568,7 @@ func (rs *resumeServiceImpl) ProcessLLMTasks(ctx context.Context, message storag
 		log.Error().Err(err).Msg("LLM处理最终事务失败")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "最终事务失败")
-		updateErr := rs.components.Storage.MySQL.UpdateResumeProcessingStatus(
+		updateErr := rs.updateProcessingStatusWithCache(
 			ctx, message.SubmissionUUID, constants.StatusLLMProcessingFailed)
 		if updateErr != nil {
 			log.Error().Err(updateErr).Msg("更新状态为LLM_PROCESSING_FAILED失败")
@@ -898,68 +898,44 @@ func (rs *resumeServiceImpl) prepareFinalDBUpdates(basicInfo map[string]string, 
 
 // saveMatchEvaluation 保存人岗匹配评估结果
 func (rs *resumeServiceImpl) saveMatchEvaluation(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeProcessingMessage, parsedText string) error {
-	log := rs.logger.With().
-		Str("submission_uuid", message.SubmissionUUID).
-		Str("target_job_id", message.TargetJobID).
-		Str("method", "saveMatchEvaluation").
-		Logger()
-
-	// 检查评估器是否初始化
-	if rs.components.MatchEvaluator == nil {
-		log.Warn().Msg("匹配评估器未初始化，跳过评估")
-		return ErrEvaluatorNotInit
+	if message.TargetJobID == "" {
+		return nil // 无需操作，直接返回
 	}
 
-	// 1. 获取岗位描述
-	job, err := rs.components.Storage.MySQL.GetJobByID(tx, message.TargetJobID)
+	// 从数据库获取岗位描述
+	job, err := rs.components.Storage.MySQL.GetJobByID(tx.WithContext(ctx), message.TargetJobID)
 	if err != nil {
-		log.Error().Err(err).Msg("获取岗位信息失败")
-		return fmt.Errorf("获取岗位信息失败: %w", err)
+		rs.logger.Error().Err(err).
+			Str("job_id", message.TargetJobID).
+			Str("submission_uuid", message.SubmissionUUID).
+			Msg("获取JD信息失败")
+		return fmt.Errorf("获取JD信息失败: %w", err)
 	}
 
 	if job.JobDescriptionText == "" {
-		log.Warn().Msg("岗位描述为空，跳过评估")
-		return fmt.Errorf("岗位描述为空")
+		return fmt.Errorf("JD文本为空")
 	}
 
-	// 2. 调用匹配评估器 - 创建专门的评估span
-	ctx, evalSpan := tracer.Start(ctx, "MatchEvaluator.EvaluateMatch",
-		trace.WithAttributes(
-			attribute.String("job_id", message.TargetJobID),
-			attribute.String("submission_uuid", message.SubmissionUUID),
-			attribute.String("llm_model", rs.config.GetModelForTask("job_evaluate")),
-		))
+	// 使用匹配评估器进行评估
+	if rs.components.MatchEvaluator == nil {
+		return fmt.Errorf("匹配评估器未初始化")
+	}
 
-	evalSpan.SetAttributes(
-		attribute.Int("resume_text_length", len(parsedText)),
-		attribute.Int("job_text_length", len(job.JobDescriptionText)),
-	)
-
-	evaluation, err := rs.components.MatchEvaluator.EvaluateMatch(ctx, job.JobDescriptionText, parsedText)
+	evaluation, err := rs.components.MatchEvaluator.EvaluateMatch(ctx, parsedText, job.JobDescriptionText)
 	if err != nil {
-		log.Error().Err(err).Msg("执行匹配评估失败")
-		evalSpan.RecordError(err)
-		evalSpan.SetStatus(codes.Error, "evaluation failed")
-		evalSpan.End()
-		return fmt.Errorf("执行匹配评估失败: %w", err)
+		rs.logger.Error().Err(err).
+			Str("job_id", message.TargetJobID).
+			Str("submission_uuid", message.SubmissionUUID).
+			Msg("人岗匹配评估失败")
+		return fmt.Errorf("人岗匹配评估失败: %w", err)
 	}
 
-	// 记录评估结果的主要指标
-	evalSpan.SetAttributes(
-		attribute.Int("match_score", evaluation.MatchScore),
-		attribute.Int("highlights_count", len(evaluation.MatchHighlights)),
-		attribute.Int("gaps_count", len(evaluation.PotentialGaps)),
-		attribute.Int("summary_length", len(evaluation.ResumeSummaryForJD)),
-	)
-	evalSpan.SetStatus(codes.Ok, "evaluation successful")
-	evalSpan.End()
-
-	// 3. 序列化评估结果的一部分字段
+	// 序列化评估结果的一部分字段
 	highlightsJSON, _ := json.Marshal(evaluation.MatchHighlights)
 	gapsJSON, _ := json.Marshal(evaluation.PotentialGaps)
 
-	// 4. 保存评估结果
-	match := &models.JobSubmissionMatch{
+	// 保存评估结果到数据库
+	matchResult := &models.JobSubmissionMatch{
 		SubmissionUUID:         message.SubmissionUUID,
 		JobID:                  message.TargetJobID,
 		LLMMatchScore:          &evaluation.MatchScore,
@@ -967,18 +943,123 @@ func (rs *resumeServiceImpl) saveMatchEvaluation(ctx context.Context, tx *gorm.D
 		LLMPotentialGapsJSON:   gapsJSON,
 		LLMResumeSummaryForJD:  evaluation.ResumeSummaryForJD,
 		EvaluationStatus:       "COMPLETED",
-		EvaluatedAt:            utils.TimePtr(time.Now()),
+		EvaluatedAt:            &[]time.Time{time.Now()}[0],
 	}
 
-	if err := rs.components.Storage.MySQL.CreateJobSubmissionMatch(tx, match); err != nil {
-		log.Error().Err(err).Msg("保存匹配结果到MySQL失败")
-		return fmt.Errorf("保存匹配结果失败: %w", err)
+	if err := rs.components.Storage.MySQL.CreateJobSubmissionMatch(tx, matchResult); err != nil {
+		rs.logger.Error().Err(err).
+			Interface("match_result", matchResult).
+			Msg("保存人岗匹配结果失败")
+		return fmt.Errorf("保存人岗匹配结果失败: %w", err)
 	}
 
-	log.Debug().
+	rs.logger.Info().
+		Str("job_id", message.TargetJobID).
+		Str("submission_uuid", message.SubmissionUUID).
 		Int("match_score", evaluation.MatchScore).
-		Int("highlights_count", len(evaluation.MatchHighlights)).
-		Msg("成功保存匹配评估结果")
+		Msg("成功保存人岗匹配评估结果")
 
+	return nil
+}
+
+// getProcessingStatusFromRedis 从Redis获取处理状态
+func (rs *resumeServiceImpl) getProcessingStatusFromRedis(ctx context.Context, submissionUUID string) (string, bool, error) {
+	redisKey := fmt.Sprintf("processing_status:%s", submissionUUID)
+	status, err := rs.components.Storage.Redis.Get(ctx, redisKey)
+	if err != nil {
+		return "", false, err
+	}
+	return status, status != "", nil
+}
+
+// setProcessingStatusToRedis 设置处理状态到Redis
+func (rs *resumeServiceImpl) setProcessingStatusToRedis(ctx context.Context, submissionUUID, status string) error {
+	redisKey := fmt.Sprintf("processing_status:%s", submissionUUID)
+	// 设置过期时间为1小时，避免数据积累
+	return rs.components.Storage.Redis.Set(ctx, redisKey, status, time.Hour)
+}
+
+// acquireProcessingLock 获取处理锁
+func (rs *resumeServiceImpl) acquireProcessingLock(ctx context.Context, submissionUUID string) (string, error) {
+	lockKey := fmt.Sprintf("processing_lock:%s", submissionUUID)
+	// 锁的过期时间为10分钟
+	lockValue, err := rs.components.Storage.Redis.AcquireLock(ctx, lockKey, 10*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("获取处理锁失败，资源正在被其他进程处理: %w", err)
+	}
+	return lockValue, nil
+}
+
+// releaseProcessingLock 释放处理锁
+func (rs *resumeServiceImpl) releaseProcessingLock(ctx context.Context, submissionUUID, lockValue string) error {
+	lockKey := fmt.Sprintf("processing_lock:%s", submissionUUID)
+	// 使用Redis的ReleaseLock方法释放锁
+	_, err := rs.components.Storage.Redis.ReleaseLock(ctx, lockKey, lockValue)
+	return err
+}
+
+// checkProcessingStatusWithCache 检查处理状态（优先使用缓存）
+func (rs *resumeServiceImpl) checkProcessingStatusWithCache(ctx context.Context, submissionUUID string) (string, bool, error) {
+	// 1. 首先尝试从Redis缓存获取状态
+	cachedStatus, found, err := rs.getProcessingStatusFromRedis(ctx, submissionUUID)
+	if err != nil {
+		rs.logger.Debug().Err(err).Str("submission_uuid", submissionUUID).Msg("从Redis获取状态失败，回退到MySQL")
+	} else if found {
+		// 检查缓存状态是否允许处理
+		allowed := constants.IsStatusAllowed(cachedStatus, constants.AllowedStatusesForLLM)
+		return cachedStatus, allowed, nil
+	}
+
+	// 2. 缓存未命中或失败，从MySQL获取并缓存
+	var submission models.ResumeSubmission
+	err = rs.components.Storage.MySQL.DB().WithContext(ctx).
+		Where("submission_uuid = ?", submissionUUID).
+		First(&submission).Error
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", false, nil // 记录不存在，不允许处理
+		}
+		return "", false, fmt.Errorf("获取提交记录失败: %w", err)
+	}
+
+	// 3. 更新Redis缓存
+	if cacheErr := rs.setProcessingStatusToRedis(ctx, submissionUUID, submission.ProcessingStatus); cacheErr != nil {
+		rs.logger.Debug().Err(cacheErr).Str("submission_uuid", submissionUUID).Msg("更新Redis缓存失败")
+	}
+
+	// 4. 检查状态是否允许处理
+	allowed := constants.IsStatusAllowed(submission.ProcessingStatus, constants.AllowedStatusesForLLM)
+	return submission.ProcessingStatus, allowed, nil
+}
+
+// updateProcessingStatusWithCache 更新处理状态并同步缓存
+func (rs *resumeServiceImpl) updateProcessingStatusWithCache(ctx context.Context, submissionUUID, newStatus string) error {
+	// 首先更新Redis缓存
+	redisErr := rs.setProcessingStatusToRedis(ctx, submissionUUID, newStatus)
+	if redisErr != nil {
+		rs.logger.Debug().Err(redisErr).Str("submission_uuid", submissionUUID).Msg("Redis状态更新失败")
+	}
+
+	// 检查是否为需要持久化到MySQL的关键状态
+	criticalStatuses := map[string]bool{
+		constants.StatusProcessingCompleted:    true,
+		constants.StatusChunkingFailed:         true,
+		constants.StatusVectorizationFailed:    true,
+		constants.StatusQdrantStoreFailed:      true,
+		constants.StatusLLMProcessingFailed:    true,
+		constants.StatusUploadProcessingFailed: true,
+	}
+
+	if criticalStatuses[newStatus] {
+		// 关键状态需要持久化到MySQL
+		err := rs.components.Storage.MySQL.UpdateResumeProcessingStatus(ctx, submissionUUID, newStatus)
+		if err != nil {
+			rs.logger.Debug().Err(err).Str("submission_uuid", submissionUUID).Msg("MySQL状态更新失败")
+			return err
+		}
+	}
+
+	// 其他状态只存在Redis缓存中
 	return nil
 }

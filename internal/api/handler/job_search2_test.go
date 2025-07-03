@@ -1,22 +1,22 @@
-package handler_test
+package handler_test // 测试包，用于测试handler包中的功能
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"math"
-	"net/http"
-	"os"
-	"sort"
-	"testing"
+	"bytes"         // 用于处理字节缓冲区
+	"context"       // 用于控制请求的上下文
+	"encoding/json" // 用于JSON编解码
+	"fmt"           // 用于格式化输出
+	"io"            // 提供I/O原语
+	"math"          // 提供数学函数
+	"net/http"      // HTTP客户端和服务器实现
+	"os"            // 提供操作系统功能
+	"sort"          // 提供排序函数
+	"testing"       // Go测试框架
 
-	"ai-agent-go/internal/config"
-	"ai-agent-go/internal/parser"
-	"ai-agent-go/internal/storage"
+	"ai-agent-go/internal/config"  // 项目配置包
+	"ai-agent-go/internal/parser"  // 解析器包
+	"ai-agent-go/internal/storage" // 存储相关包
 
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/require" // 测试断言库
 )
 
 // TestRerankerEffectiveness 专门用于评估Reranker模型对搜索结果的实际影响。
@@ -26,10 +26,10 @@ import (
  * 召回300  → 轻量粗排120 (单批)  → 60×2 分批精排
  * →  批内 z-score  →  RRF 融合  →  简历级(uuid)聚合  → 评测
  */
-func TestRerankerEffectiveness(t *testing.T) {
+func TestRerankerEffectiveness(t *testing.T) { // 定义一个测试函数，用于评估Reranker模型的有效性
 	// ---------- 0. 通用初始化 ----------
-	testLogger, err := NewTestLogger(t, "reranker_effectiveness_analysis")
-	require.NoError(t, err, "创建测试日志记录器失败")
+	testLogger, err := NewTestLogger(t, "reranker_effectiveness_analysis") // 创建一个新的测试日志记录器，并命名为 "reranker_effectiveness_analysis"
+	require.NoError(t, err, "创建测试日志记录器失败")                                 // 断言在创建日志记录器过程中没有发生错误，如果出错则测试失败
 	defer testLogger.Close()
 
 	testLogger.Log("开始测试Reranker模型有效性...")
@@ -564,13 +564,15 @@ func TestRerankerEffectiveness(t *testing.T) {
 
 // --- 融合与评估辅助函数 ---
 
+// fusedDoc 结构体用于存储同时具有向量分数和重排序分数的文档信息
 type fusedDoc struct {
-	uuid        string
-	vectorScore float32
-	rerankScore float32
+	uuid        string  // 简历唯一标识符
+	vectorScore float32 // 向量搜索得分
+	rerankScore float32 // 重排序得分
 }
 
 // linearFusion 对一组包含两种分数的文档进行归一化和线性融合
+// 参数docs为待融合的文档列表，wVector和wRerank分别为向量分数和重排序分数的权重
 func linearFusion(docs []fusedDoc, wVector, wRerank float32) []RankedSubmission {
 	if len(docs) == 0 {
 		return nil
@@ -612,48 +614,52 @@ func linearFusion(docs []fusedDoc, wVector, wRerank float32) []RankedSubmission 
 
 // evaluateAndLogMetrics 封装了评估和日志记录的逻辑。
 // 它接收一个按分数排序的简历列表，并根据黄金集计算性能指标。
+// 参数t为测试上下文，testLogger为日志记录器，scenarioName为测试场景名称，
+// rankedSubmissions为排序后的简历列表，goldenSet为黄金标准集
 func evaluateAndLogMetrics(t *testing.T, testLogger *TestLogger, scenarioName string, rankedSubmissions []RankedSubmission, goldenSet *GoldenTruthSet) {
-	testLogger.Log("开始为场景 [%s] 计算性能指标...", scenarioName)
+	testLogger.Log("开始为场景 [%s] 计算性能指标...", scenarioName) // 记录开始计算指标的日志
 
-	if len(rankedSubmissions) == 0 {
+	if len(rankedSubmissions) == 0 { // 检查结果列表是否为空
 		testLogger.Log("警告: 场景 [%s] 的排名结果为空，跳过指标计算。", scenarioName)
 		return
 	}
 
 	// 为每个结果分配其在黄金集中的相关性等级
-	hasHit := false
+	hasHit := false // 标记是否有命中黄金集的结果
 	for i := range rankedSubmissions {
 		uuid := rankedSubmissions[i].UUID
-		if goldenSet.Tier1[uuid] {
-			rankedSubmissions[i].RelevanceTier = "Tier1"
+		if goldenSet.Tier1[uuid] { // 检查是否在Tier1中
+			rankedSubmissions[i].RelevanceTier = "Tier1" // 标记为最高相关性
 			hasHit = true
-		} else if goldenSet.Tier2[uuid] {
-			rankedSubmissions[i].RelevanceTier = "Tier2"
+		} else if goldenSet.Tier2[uuid] { // 检查是否在Tier2中
+			rankedSubmissions[i].RelevanceTier = "Tier2" // 标记为中等相关性
 			hasHit = true
-		} else if goldenSet.Tier3[uuid] {
-			rankedSubmissions[i].RelevanceTier = "Tier3"
+		} else if goldenSet.Tier3[uuid] { // 检查是否在Tier3中
+			rankedSubmissions[i].RelevanceTier = "Tier3" // 标记为低相关性
 			hasHit = true
 		} else {
-			rankedSubmissions[i].RelevanceTier = "N/A"
+			rankedSubmissions[i].RelevanceTier = "N/A" // 标记为不相关
 		}
 	}
 
+	// 如果没有命中任何黄金集条目，记录警告
 	if !hasHit {
 		testLogger.Log("警告: 在场景 [%s] 中，排名结果未命中任何黄金集条目。性能指标可能无意义。", scenarioName)
 	}
 
 	// 打印 Top-10 结果以供快速检查
-	topN := 10
+	topN := 10 // 默认展示前10个结果
 	if len(rankedSubmissions) < topN {
-		topN = len(rankedSubmissions)
+		topN = len(rankedSubmissions) // 如果结果不足10个，则展示所有结果
 	}
 	testLogger.LogObject(fmt.Sprintf("[%s] Top %d ranked resumes", scenarioName, topN), rankedSubmissions[:topN])
 
-	// 计算并记录性能指标
+	// 计算并记录Top-10性能指标
 	metrics10 := calculatePerformanceMetrics(rankedSubmissions, goldenSet, 10)
 	testLogger.Log("[%s] Performance Metrics @10: Precision=%.4f, Recall=%.4f, NDCG=%.4f, MRR=%.4f",
 		scenarioName, metrics10.Precision, metrics10.Recall, metrics10.NDCG, metrics10.MRR)
 
+	// 计算并记录Top-30性能指标
 	metrics30 := calculatePerformanceMetrics(rankedSubmissions, goldenSet, 30)
 	testLogger.Log("[%s] Performance Metrics @30: Precision=%.4f, Recall=%.4f, NDCG=%.4f",
 		scenarioName, metrics30.Precision, metrics30.Recall, metrics30.NDCG)
@@ -661,244 +667,252 @@ func evaluateAndLogMetrics(t *testing.T, testLogger *TestLogger, scenarioName st
 
 // callRerankerWithDocuments 是一个本地实现的 reranker 调用函数
 func callRerankerWithDocuments(ctx context.Context, rerankerURL string, query string, documents []RerankDocument, t *testing.T, logger *TestLogger) (map[string]float32, error) {
-	if rerankerURL == "" {
-		logger.Log("Reranker URL is not configured. Skipping rerank.")
-		return make(map[string]float32), nil
+	if rerankerURL == "" { // 检查reranker服务的URL是否已配置
+		logger.Log("Reranker URL is not configured. Skipping rerank.") // 如果未配置，则记录日志并跳过
+		return make(map[string]float32), nil                           // 返回一个空的map和nil错误
 	}
 
-	reqBody := RerankRequest{
-		Query:     query,
-		Documents: documents,
+	reqBody := RerankRequest{ // 创建一个Rerank请求体
+		Query:     query,     // 设置查询语句
+		Documents: documents, // 设置待重排序的文档
 	}
 
-	jsonData, err := json.Marshal(reqBody)
+	jsonData, err := json.Marshal(reqBody) // 将请求体序列化为JSON格式
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal rerank request: %w", err)
+		return nil, fmt.Errorf("failed to marshal rerank request: %w", err) // 如果序列化失败，返回错误
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", rerankerURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", rerankerURL, bytes.NewBuffer(jsonData)) // 创建一个带上下文的HTTP POST请求
 	if err != nil {
-		return nil, fmt.Errorf("failed to create rerank request: %w", err)
+		return nil, fmt.Errorf("failed to create rerank request: %w", err) // 如果创建请求失败，返回错误
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/json") // 设置请求头的内容类型为JSON
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	client := &http.Client{}    // 创建一个HTTP客户端
+	resp, err := client.Do(req) // 发送HTTP请求并获取响应
 	if err != nil {
-		return nil, fmt.Errorf("failed to call reranker service: %w", err)
+		return nil, fmt.Errorf("failed to call reranker service: %w", err) // 如果请求失败，返回错误
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() // 确保在函数返回时关闭响应体
 
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("reranker service returned non-OK status: %s, body: %s", resp.Status, string(bodyBytes))
-	}
-
-	var rerankedDocs []RerankedDocument
-	if err := json.NewDecoder(resp.Body).Decode(&rerankedDocs); err != nil {
-		return nil, fmt.Errorf("failed to decode reranker response: %w", err)
+	if resp.StatusCode != http.StatusOK { // 检查响应的状态码是否为200 OK
+		bodyBytes, _ := io.ReadAll(resp.Body)                                                                           // 读取响应体内容以供调试
+		return nil, fmt.Errorf("reranker service returned non-OK status: %s, body: %s", resp.Status, string(bodyBytes)) // 如果状态码不为200，返回错误信息
 	}
 
-	scores := make(map[string]float32)
-	for _, doc := range rerankedDocs {
-		scores[doc.ID] = doc.RerankScore
+	var rerankedDocs []RerankedDocument                                      // 定义一个变量来存储解码后的重排序文档
+	if err := json.NewDecoder(resp.Body).Decode(&rerankedDocs); err != nil { // 解码响应体中的JSON数据
+		return nil, fmt.Errorf("failed to decode reranker response: %w", err) // 如果解码失败，返回错误
 	}
 
-	return scores, nil
+	scores := make(map[string]float32) // 创建一个map来存储文档ID和对应的重排序分数
+	for _, doc := range rerankedDocs { // 遍历所有重排序后的文档
+		scores[doc.ID] = doc.RerankScore // 将文档ID和分数存入map
+	}
+
+	return scores, nil // 返回包含所有分数的map和nil错误
 }
 
 // --- 评估指标相关辅助函数 ---
 
 // RankedSubmission 用于评估的排序后简历对象
 type RankedSubmission struct {
-	UUID          string
-	Score         float32
-	RelevanceTier string
+	UUID          string  // 简历唯一标识符
+	Score         float32 // 排序得分
+	RelevanceTier string  // 相关性等级(Tier1/Tier2/Tier3/N/A)
 }
 
 // PerformanceMetrics 存储计算出的评估指标
 type PerformanceMetrics struct {
-	Precision float64
-	Recall    float64
-	NDCG      float64
-	MRR       float64
+	Precision float64 // 准确率：相关结果数/返回结果总数
+	Recall    float64 // 召回率：相关结果数/所有相关结果总数
+	NDCG      float64 // 归一化折损累积增益：评估排序质量
+	MRR       float64 // 平均倒数排名：首个相关结果的排名质量
 }
 
 // getRelevanceScore 将黄金集中的Tier映射为数值分数用于NDCG计算
-func getRelevanceScore(tier string) float64 {
-	switch tier {
-	case "Tier1":
-		return 3.0
-	case "Tier2":
-		return 2.0
-	case "Tier3":
-		return 1.0
-	default:
-		return 0.0
+// 参数tier为相关性等级，返回对应的数值评分：Tier1=3.0, Tier2=2.0, Tier3=1.0, 其他=0.0
+func getRelevanceScore(tier string) float64 { // 定义获取相关性分数的函数
+	switch tier { // 根据输入的相关性等级字符串
+	case "Tier1": // 如果是最高相关性
+		return 3.0 // 返回3.0分
+	case "Tier2": // 如果是中等相关性
+		return 2.0 // 返回2.0分
+	case "Tier3": // 如果是低相关性
+		return 1.0 // 返回1.0分
+	default: // 对于其他情况 (如 "N/A")
+		return 0.0 // 返回0.0分
 	}
 }
 
 // calculatePerformanceMetrics 计算各种排序评估指标
-func calculatePerformanceMetrics(rankedSubmissions []RankedSubmission, goldenSet *GoldenTruthSet, k int) PerformanceMetrics {
-	var hits, totalRelevant int
-	var dcg, mrr float64
-	firstRelevantFound := false
+// 参数rankedSubmissions为排序后的简历列表，goldenSet为黄金标准集，k为评估的结果数量
+func calculatePerformanceMetrics(rankedSubmissions []RankedSubmission, goldenSet *GoldenTruthSet, k int) PerformanceMetrics { // 定义计算性能指标的函数
+	var hits, totalRelevant int // 定义命中数（仅计Tier1/2）和总相关数（Tier1+Tier2）
+	var dcg, mrr float64        // 定义DCG（折损累积增益）和MRR（平均倒数排名）
+	firstRelevantFound := false // 定义一个布尔标志，用于记录是否已找到第一个相关结果
 
-	totalRelevant = len(goldenSet.Tier1) + len(goldenSet.Tier2) // 假定Tier1和Tier2是相关的
-	if totalRelevant == 0 {
-		totalRelevant = 1 // Avoid division by zero for recall
+	totalRelevant = len(goldenSet.Tier1) + len(goldenSet.Tier2) // 计算总的相关条目数（这里假定Tier1和Tier2是用户期望看到的相关结果）
+	if totalRelevant == 0 {                                     // 如果黄金集中没有相关条目
+		totalRelevant = 1 // 将其设置为1，以避免在计算召回率时发生除零错误
 	}
 
-	if k > len(rankedSubmissions) {
-		k = len(rankedSubmissions)
+	if k > len(rankedSubmissions) { // 检查k值是否超过了排序列表的总长度
+		k = len(rankedSubmissions) // 如果是，则将k设置为列表的实际长度
 	}
 
-	for i := 0; i < k; i++ {
-		sub := rankedSubmissions[i]
-		relevanceScore := getRelevanceScore(sub.RelevanceTier)
+	// 计算前k个结果的评估指标
+	for i := 0; i < k; i++ { // 遍历排序列表的前k个结果
+		sub := rankedSubmissions[i]                            // 获取当前位置的简历
+		relevanceScore := getRelevanceScore(sub.RelevanceTier) // 获取该简历的相关性分数
 
-		if relevanceScore >= 2.0 { // Tier1 或 Tier2
-			hits++
-			if !firstRelevantFound {
-				mrr = 1.0 / float64(i+1)
-				firstRelevantFound = true
+		if relevanceScore >= 2.0 { // 如果相关性分数大于等于2.0 (即Tier1或Tier2)，则视为命中
+			hits++                   // 命中数加一
+			if !firstRelevantFound { // 如果这是第一次找到相关结果
+				mrr = 1.0 / float64(i+1)  // 计算MRR，其值为第一个相关结果排名的倒数
+				firstRelevantFound = true // 将标志位设为true
 			}
 		}
-		dcg += relevanceScore / math.Log2(float64(i+2))
+		dcg += relevanceScore / math.Log2(float64(i+2)) // 累加DCG值，分母使用i+2以确保对数计算有意义
 	}
 
-	// 计算IDCG
-	var idealRelevances []float64
-	for range goldenSet.Tier1 {
-		idealRelevances = append(idealRelevances, getRelevanceScore("Tier1"))
+	// 计算理想DCG(IDCG)
+	var idealRelevances []float64 // 创建一个切片来存储理想情况下的相关性分数列表
+	// 构建理想相关性分数列表
+	for range goldenSet.Tier1 { // 遍历黄金集中的Tier1
+		idealRelevances = append(idealRelevances, getRelevanceScore("Tier1")) // 添加Tier1的分数
 	}
-	for range goldenSet.Tier2 {
-		idealRelevances = append(idealRelevances, getRelevanceScore("Tier2"))
+	for range goldenSet.Tier2 { // 遍历黄金集中的Tier2
+		idealRelevances = append(idealRelevances, getRelevanceScore("Tier2")) // 添加Tier2的分数
 	}
-	for range goldenSet.Tier3 {
-		idealRelevances = append(idealRelevances, getRelevanceScore("Tier3"))
+	for range goldenSet.Tier3 { // 遍历黄金集中的Tier3
+		idealRelevances = append(idealRelevances, getRelevanceScore("Tier3")) // 添加Tier3的分数
 	}
-	sort.Slice(idealRelevances, func(i, j int) bool {
-		return idealRelevances[i] > idealRelevances[j]
+	// 按相关性分数降序排序
+	sort.Slice(idealRelevances, func(i, j int) bool { // 对理想分数列表进行降序排序
+		return idealRelevances[i] > idealRelevances[j] // 排序规则
 	})
 
-	var idcg float64
-	if k > len(idealRelevances) {
-		k = len(idealRelevances)
+	// 计算IDCG值
+	var idcg float64              // 初始化IDCG（理想折损累积增益）
+	if k > len(idealRelevances) { // 如果k值大于理想列表的长度
+		k = len(idealRelevances) // 则将k设置为理想列表的长度
 	}
-	for i := 0; i < k; i++ {
-		idcg += idealRelevances[i] / math.Log2(float64(i+2))
-	}
-
-	var ndcg float64
-	if idcg > 0 {
-		ndcg = dcg / idcg
+	for i := 0; i < k; i++ { // 遍历理想列表的前k个结果
+		idcg += idealRelevances[i] / math.Log2(float64(i+2)) // 累加计算IDCG
 	}
 
+	// 计算NDCG
+	var ndcg float64 // 初始化NDCG（归一化折损累积增益）
+	if idcg > 0 {    // 只有在IDCG大于0时计算才有意义
+		ndcg = dcg / idcg // NDCG = DCG / IDCG
+	}
+
+	// 返回所有计算的评估指标
 	return PerformanceMetrics{
-		Precision: float64(hits) / float64(k),
-		Recall:    float64(hits) / float64(totalRelevant),
-		NDCG:      ndcg,
-		MRR:       mrr,
+		Precision: float64(hits) / float64(k),             // 准确率 = 命中的相关结果数 / 返回的总结果数k
+		Recall:    float64(hits) / float64(totalRelevant), // 召回率 = 命中的相关结果数 / 所有相关结果的总数
+		NDCG:      ndcg,                                   // 归一化折损累积增益
+		MRR:       mrr,                                    // 平均倒数排名
 	}
 }
 
 // TestBestChunkPipeline 实现了一个最小可行流程：召回->按简历选最佳Chunk->取Top-N简历->Rerank
-func TestBestChunkPipeline(t *testing.T) {
+func TestBestChunkPipeline(t *testing.T) { // 定义一个名为 TestBestChunkPipeline 的测试函数
 	// 1. 初始化环境 (与 TestRerankerEffectiveness 类似)
-	testLogger, err := NewTestLogger(t, "best_chunk_pipeline_analysis")
-	require.NoError(t, err, "创建测试日志记录器失败")
-	defer testLogger.Close()
+	testLogger, err := NewTestLogger(t, "best_chunk_pipeline_analysis") // 创建一个新的测试日志记录器，专门用于此流程的分析
+	require.NoError(t, err, "创建测试日志记录器失败")                              // 断言日志记录器创建成功，否则测试失败
+	defer testLogger.Close()                                            // 确保在测试结束时关闭日志记录器以释放资源
 
-	testLogger.Log("开始测试 'Best Chunk' 最小可行性流程...")
-	ctx := context.Background()
+	testLogger.Log("开始测试 'Best Chunk' 最小可行性流程...") // 记录一条日志，标志着测试的开始
+	ctx := context.Background()                    // 创建一个空的背景上下文
 
-	cfg, err := config.LoadConfigFromFileAndEnv(jobSearchTestConfigPath)
-	require.NoError(t, err, "加载配置失败")
+	cfg, err := config.LoadConfigFromFileAndEnv(jobSearchTestConfigPath) // 从指定的配置文件路径和环境变量加载配置
+	require.NoError(t, err, "加载配置失败")                                    // 断言配置加载成功，否则测试失败
 
-	s, err := storage.NewStorage(ctx, cfg)
-	require.NoError(t, err, "初始化存储组件失败")
-	defer s.Close()
+	s, err := storage.NewStorage(ctx, cfg) // 根据加载的配置和上下文初始化存储服务
+	require.NoError(t, err, "初始化存储组件失败")   // 断言存储服务初始化成功
+	defer s.Close()                        // 确保在测试结束时关闭存储服务的连接
 
-	if os.Getenv("CI") != "" {
-		t.Skip("在CI环境中跳过此测试")
+	if os.Getenv("CI") != "" { // 检查是否在CI/CD环境中运行
+		t.Skip("在CI环境中跳过此测试") // 如果是，则跳过此测试以避免不必要的资源消耗或依赖问题
 	}
-	if s.Qdrant == nil || cfg.Reranker.URL == "" {
-		t.Skip("跳过测试：Qdrant或Reranker服务未配置")
+	if s.Qdrant == nil || cfg.Reranker.URL == "" { // 检查Qdrant向量数据库和Reranker服务是否都已配置
+		t.Skip("跳过测试：Qdrant或Reranker服务未配置") // 如果有任何一个未配置，则跳过测试
 	}
 
-	embedder, err := parser.NewAliyunEmbedder(cfg.Aliyun.APIKey, cfg.Aliyun.Embedding)
-	require.NoError(t, err, "初始化embedder失败")
+	embedder, err := parser.NewAliyunEmbedder(cfg.Aliyun.APIKey, cfg.Aliyun.Embedding) // 初始化阿里云的文本嵌入器(Embedder)
+	require.NoError(t, err, "初始化embedder失败")                                           // 断言Embedder初始化成功
 
-	jobDesc := `我们正在寻找一位经验丰富的高级Go后端及微服务工程师，加入我们的核心技术团队，负责设计、开发和维护大规模、高可用的分布式系统。您将有机会参与到从架构设计到服务上线的全过程，应对高并发、低延迟的挑战。`
-	vectors, err := embedder.EmbedStrings(ctx, []string{jobDesc})
-	require.NoError(t, err)
-	vector := vectors[0]
+	jobDesc := `我们正在寻找一位经验丰富的高级Go后端及微服务工程师，加入我们的核心技术团队，负责设计、开发和维护大规模、高可用的分布式系统。您将有机会参与到从架构设计到服务上线的全过程，应对高并发、低延迟的挑战。` // 定义一个用于搜索的职位描述(JD)字符串
+	vectors, err := embedder.EmbedStrings(ctx, []string{jobDesc})                                                    // 使用Embedder将JD文本转换为向量表示
+	require.NoError(t, err)                                                                                          // 断言向量化过程没有错误
+	vector := vectors[0]                                                                                             // 获取生成的向量
 
-	goldenSet := getGoBackendGoldenTruthSet()
-	testLogger.Log("黄金评测集已加载: Tier1=%d, Tier2=%d, Tier3=%d", len(goldenSet.Tier1), len(goldenSet.Tier2), len(goldenSet.Tier3))
+	goldenSet := getGoBackendGoldenTruthSet()                                                                                  // 获取用于评估的Go后端工程师简历的"黄金标准"集合
+	testLogger.Log("黄金评测集已加载: Tier1=%d, Tier2=%d, Tier3=%d", len(goldenSet.Tier1), len(goldenSet.Tier2), len(goldenSet.Tier3)) // 记录黄金集中不同等级的简历数量
 
 	// 2. 步骤 1: 召回 300 个 chunk
-	const recallLimit = 300
-	retrievedDocs, err := s.Qdrant.SearchSimilarResumes(ctx, vector, recallLimit, nil)
-	require.NoError(t, err, "向量搜索失败")
-	testLogger.Log("步骤 1: 成功召回 %d 个文档块", len(retrievedDocs))
+	const recallLimit = 300                                                            // 定义向量召回的文档数量上限为300
+	retrievedDocs, err := s.Qdrant.SearchSimilarResumes(ctx, vector, recallLimit, nil) // 在Qdrant中执行相似性搜索，召回300个文档块
+	require.NoError(t, err, "向量搜索失败")                                                  // 断言向量搜索成功
+	testLogger.Log("步骤 1: 成功召回 %d 个文档块", len(retrievedDocs))                           // 记录召回的文档块数量
 
 	// 3. 步骤 2: 按 uuid 分组，取每组 vector_score 最大的那个 chunk
-	bestPerResume := make(map[string]storage.SearchResult)
-	for _, doc := range retrievedDocs {
-		uuid, ok := doc.Payload["submission_uuid"].(string)
-		if !ok {
-			continue // 跳过没有uuid的脏数据
+	bestPerResume := make(map[string]storage.SearchResult) // 创建一个map来存储每个独立简历(uuid)的得分最高的文档块
+	for _, doc := range retrievedDocs {                    // 遍历所有召回的文档块
+		uuid, ok := doc.Payload["submission_uuid"].(string) // 从Payload中获取简历的唯一标识符(uuid)
+		if !ok {                                            // 如果payload中没有uuid
+			continue // 跳过这个可能存在的脏数据
 		}
-		if existing, ok := bestPerResume[uuid]; !ok || doc.Score > existing.Score {
-			bestPerResume[uuid] = doc
+		if existing, ok := bestPerResume[uuid]; !ok || doc.Score > existing.Score { // 如果该简历尚未记录，或者当前文档块的向量分数更高
+			bestPerResume[uuid] = doc // 更新该简历的最佳代表块
 		}
 	}
-	testLogger.Log("步骤 2: 从召回结果中识别出 %d 份独立简历，并选出其最佳chunk", len(bestPerResume))
+	testLogger.Log("步骤 2: 从召回结果中识别出 %d 份独立简历，并选出其最佳chunk", len(bestPerResume)) // 记录聚合后的独立简历数量
 
 	// 4. 步骤 3: 取 vector_score 前 100 的简历 (的最佳chunk)
-	tops := make([]storage.SearchResult, 0, len(bestPerResume))
-	for _, doc := range bestPerResume {
-		tops = append(tops, doc)
+	tops := make([]storage.SearchResult, 0, len(bestPerResume)) // 创建一个切片来存储这些最佳文档块
+	for _, doc := range bestPerResume {                         // 遍历map中的所有最佳块
+		tops = append(tops, doc) // 将最佳块添加到切片中
 	}
-	sort.Slice(tops, func(i, j int) bool { return tops[i].Score > tops[j].Score })
+	sort.Slice(tops, func(i, j int) bool { return tops[i].Score > tops[j].Score }) // 按向量分数对切片进行降序排序
 
-	const rerankLimit = 100
-	if len(tops) > rerankLimit {
-		tops = tops[:rerankLimit]
+	const rerankLimit = 100      // 定义用于rerank的简历数量上限
+	if len(tops) > rerankLimit { // 如果筛选出的简历数量超过上限
+		tops = tops[:rerankLimit] // 则截取分数最高的前100个
 	}
-	testLogger.Log("步骤 3: 筛选出 Top %d 的简历用于Rerank", len(tops))
+	testLogger.Log("步骤 3: 筛选出 Top %d 的简历用于Rerank", len(tops)) // 记录最终用于Rerank的简历数量
 
 	// 5. 步骤 4: 送入 Reranker
-	rerankScores, err := callReranker(ctx, cfg.Reranker.URL, jobDesc, tops, t, testLogger)
-	require.NoError(t, err, "调用Reranker服务失败")
-	testLogger.Log("步骤 4: Reranker处理完成，返回 %d 个分数", len(rerankScores))
+	rerankScores, err := callReranker(ctx, cfg.Reranker.URL, jobDesc, tops, t, testLogger) // 调用Reranker服务对这批最佳块进行重排序
+	require.NoError(t, err, "调用Reranker服务失败")                                              // 断言Reranker调用成功
+	testLogger.Log("步骤 4: Reranker处理完成，返回 %d 个分数", len(rerankScores))                      // 记录Reranker返回的分数数量
 
 	// 步骤 5: 将rerank后的分数赋给简历，并创建用于评估的列表
 	// 因为 `tops` 已经确保每个简历只出现一次，所以可以直接转换
-	var rankedSubmissions []RankedSubmission
-	for _, doc := range tops {
-		rerankScore, ok := rerankScores[doc.ID]
-		if !ok {
+	var rankedSubmissions []RankedSubmission // 创建一个用于最终评估的列表
+	for _, doc := range tops {               // 遍历用于rerank的top chunk列表
+		rerankScore, ok := rerankScores[doc.ID] // 尝试获取该chunk的rerank分数
+		if !ok {                                // 如果Reranker没有返回该chunk的分数
 			// 如果Reranker没有返回分数，则保留其原始向量分数
-			rerankScore = doc.Score
+			rerankScore = doc.Score // 使用其原始的向量分数作为备用
 		}
-		if uuid, ok := doc.Payload["submission_uuid"].(string); ok {
-			rankedSubmissions = append(rankedSubmissions, RankedSubmission{
-				UUID:  uuid,
-				Score: rerankScore,
+		if uuid, ok := doc.Payload["submission_uuid"].(string); ok { // 再次获取简历的uuid
+			rankedSubmissions = append(rankedSubmissions, RankedSubmission{ // 将结果添加到评估列表中
+				UUID:  uuid,        // 简历的uuid
+				Score: rerankScore, // 使用的分数（优先用rerank分数，否则用向量分数）
 			})
 		}
 	}
 
 	// 按 rerank 后的分数重新排序
-	sort.Slice(rankedSubmissions, func(i, j int) bool {
-		return rankedSubmissions[i].Score > rankedSubmissions[j].Score
+	sort.Slice(rankedSubmissions, func(i, j int) bool { // 对最终的评估列表进行排序
+		return rankedSubmissions[i].Score > rankedSubmissions[j].Score // 按最终分数（rerank或vector）进行降序排列
 	})
 
 	// 步骤 6: 评估结果
-	evaluateAndLogMetrics(t, testLogger, "Best Chunk Pipeline", rankedSubmissions, &goldenSet)
+	evaluateAndLogMetrics(t, testLogger, "Best Chunk Pipeline", rankedSubmissions, &goldenSet) // 调用评估函数，并记录该流程的性能指标
 
-	t.Log("'Best Chunk' 最小可行性流程测试完成。")
+	t.Log("'Best Chunk' 最小可行性流程测试完成。") // 在Go测试日志中记录测试完成的消息
 }

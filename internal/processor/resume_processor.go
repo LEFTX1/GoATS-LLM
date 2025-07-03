@@ -29,12 +29,17 @@ import (
 
 	// 导入eino框架的模型组件
 	// 导入eino框架的schema定义
+
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"gorm.io/gorm"        // 导入GORM库
-	"gorm.io/gorm/clause" // 导入GORM的子句构建器
+	"gorm.io/gorm" // 导入GORM库
+	// 导入GORM的子句构建器
 )
+
+// processorTracer 是resume_processor模块专用的tracer
+var processorTracer = otel.Tracer("processor-core")
 
 // Components 聚合所有功能组件依赖，便于集中管理和测试替换
 type Components struct {
@@ -487,7 +492,7 @@ func (rp *ResumeProcessor) ProcessUploadedResume(ctx context.Context, message st
 // _parseAndDeduplicateResume 解析简历文本，去重，并将结果上传。
 // 它返回一个特殊的 ErrDuplicateContent 错误，如果文本内容是重复的。
 func (rp *ResumeProcessor) _parseAndDeduplicateResume(ctx context.Context, tx *gorm.DB, message storagetypes.ResumeUploadMessage) (string, string, error) {
-	ctx, span := tracer.Start(ctx, "ResumeProcessor._parseAndDeduplicateResume")
+	ctx, span := processorTracer.Start(ctx, "ResumeProcessor._parseAndDeduplicateResume")
 	defer span.End()
 
 	// 步骤 1: 从MinIO下载简历文件
@@ -543,7 +548,7 @@ func (rp *ResumeProcessor) _parseAndDeduplicateResume(ctx context.Context, tx *g
 // ProcessLLMTasks 接收LLM处理消息，完成分块、评估、存储向量和结果的完整流程
 // 使用数据库事务确保所有状态更新的原子性
 func (rp *ResumeProcessor) ProcessLLMTasks(ctx context.Context, message storagetypes.ResumeProcessingMessage, cfg *config.Config) error {
-	ctx, span := tracer.Start(ctx, "ResumeProcessor.ProcessLLMTasks",
+	ctx, span := processorTracer.Start(ctx, "ResumeProcessor.ProcessLLMTasks",
 		trace.WithAttributes(
 			attribute.String("submission_uuid", message.SubmissionUUID),
 			attribute.String("target_job_id", message.TargetJobID),
@@ -553,119 +558,51 @@ func (rp *ResumeProcessor) ProcessLLMTasks(ctx context.Context, message storaget
 
 	rp.logDebug("[ProcessLLMTasks] 开始处理LLM任务 for %s, 目标Job ID: %s", message.SubmissionUUID, message.TargetJobID)
 
-	// 使用事务来保证读取-更新的原子性和幂等性
-	err := rp.Storage.MySQL.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error { // 开启数据库事务
-		// 1. 获取最新的 ResumeSubmission 记录并锁定，防止并发处理
-		var submission models.ResumeSubmission                    // 声明一个submission变量
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}). // 添加悲观锁
-										Where("submission_uuid = ?", message.SubmissionUUID).
-										First(&submission).Error; err != nil { // 根据UUID查找记录
-
-			if errors.Is(err, gorm.ErrRecordNotFound) { // 如果记录未找到
-				rp.logInfo("ProcessLLMTasks: ResumeSubmission 记录未找到 for %s: %v", message.SubmissionUUID, err)
-				// 记录不存在，可能已被删除，直接确认消息
-				return nil
-			}
-			rp.logInfo("ProcessLLMTasks: 获取 ResumeSubmission 记录失败 for %s: %v", message.SubmissionUUID, err)
-			return fmt.Errorf("获取 ResumeSubmission 记录失败: %w", err)
-		}
-
-		// 2. 关键的幂等性检查
-		// 使用常量集替代内联的状态检查
-		if !constants.IsStatusAllowed(submission.ProcessingStatus, constants.AllowedStatusesForLLM) {
-			rp.logDebug("[ProcessLLMTasks] 跳过重复/无效状态的消息 for %s, 当前状态: %s", message.SubmissionUUID, submission.ProcessingStatus)
-			return nil // 状态不匹配，说明是重复消息或已处理，直接确认并返回
-		}
-
-		// 3. 更新状态为 PENDING_LLM，表示开始处理
-		if err := tx.Model(&submission).Update("processing_status", constants.StatusPendingLLM).Error; err != nil {
-			rp.logInfo("ProcessLLMTasks: 更新状态到 PENDING_LLM 失败 for %s: %v", message.SubmissionUUID, err)
-			return err
-		}
-
-		return nil // 事务成功提交
-	})
-
-	if err != nil { // 如果开始处理的事务失败
-		return err // 直接返回错误
+	// 1. 使用Redis缓存和分布式锁检查状态
+	currentStatus, allowed, err := rp.checkProcessingStatusWithCache(ctx, message.SubmissionUUID)
+	if err != nil {
+		rp.logDebug("[ProcessLLMTasks] 状态检查失败 for %s: %v", message.SubmissionUUID, err)
+		return nil // 跳过处理，避免重复消费
 	}
 
-	// --- 事务外执行IO操作 (下载文本，LLM分块，向量化，写入Qdrant) ---
+	if !allowed {
+		rp.logDebug("[ProcessLLMTasks] 状态不允许处理 for %s, 当前状态: %s", message.SubmissionUUID, currentStatus)
+		return nil // 状态不匹配，直接确认消息
+	}
+
+	// 2. 更新状态为PENDING_LLM（仅在缓存层面，减少MySQL写入）
+	err = rp.setProcessingStatusToRedis(ctx, message.SubmissionUUID, constants.StatusPendingLLM)
+	if err != nil {
+		rp.logDebug("[ProcessLLMTasks] 更新Redis状态失败，继续处理: %v", err)
+	}
+
+	// 3. 下载文本、分块、向量化（IO密集操作）
 	parsedText, sections, basicInfo, err := rp._downloadAndChunkResume(ctx, message)
-	if err != nil { // 如果下载或分块失败
-		updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusChunkingFailed) // 更新状态为分块失败
-		if updateErr != nil {                                                                                                   // 如果更新状态也失败
+	if err != nil {
+		updateErr := rp.updateProcessingStatusWithCache(ctx, message.SubmissionUUID, constants.StatusChunkingFailed)
+		if updateErr != nil {
 			rp.logInfo("更新状态为 CHUNKING_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
 		}
-		return err // 返回错误，消息将被nack
+		return err
 	}
 
-	// 向量化
 	chunkEmbeddings, err := rp._embedChunks(ctx, sections, basicInfo)
-	if err != nil { // 如果向量化失败
-		updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusVectorizationFailed) // 更新状态为向量化失败
-		if updateErr != nil {                                                                                                        // 如果更新状态也失败
+	if err != nil {
+		updateErr := rp.updateProcessingStatusWithCache(ctx, message.SubmissionUUID, constants.StatusVectorizationFailed)
+		if updateErr != nil {
 			rp.logInfo("更新状态为 VECTORIZATION_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
 		}
-		return err // 返回错误，消息将被nack
+		return err
 	}
 
-	// 准备Qdrant数据
+	// 4. 准备Qdrant数据
 	qdrantChunks, floatEmbeddings, err := rp._prepareQdrantData(message.SubmissionUUID, sections, basicInfo, chunkEmbeddings)
-	if err != nil { // 如果准备失败
-		return err // 返回错误
-	}
-
-	// 执行Qdrant写入
-	var pointIDs []string
-	if rp.Storage.Qdrant != nil { // 检查是否初始化
-		// 如果有核心分块需要存储到向量库
-		if len(qdrantChunks) > 0 && len(floatEmbeddings) > 0 {
-			pointIDs, err = rp.Storage.Qdrant.StoreResumeVectors(ctx, message.SubmissionUUID, qdrantChunks, floatEmbeddings) // 存储向量
-			if err != nil {                                                                                                  // 如果存储失败
-				rp.logInfo("ProcessLLMTasks: 存储向量到Qdrant失败 for %s: %v", message.SubmissionUUID, err)
-				// 更新状态为失败
-				updateErr := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusQdrantStoreFailed)
-				if updateErr != nil {
-					rp.logInfo("更新状态为 QDRANT_STORE_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
-				}
-				return fmt.Errorf("存储向量到Qdrant失败: %w", err)
-			}
-			rp.logDebug("[ProcessLLMTasks] 成功存储 %d 个向量到Qdrant for %s", len(pointIDs), message.SubmissionUUID)
-		} else {
-			// 如果只有BASIC_INFO，记录日志但不要报错
-			rp.logInfo("ProcessLLMTasks: 无核心分块可存储到Qdrant (可能只有BASIC_INFO) for %s", message.SubmissionUUID)
-		}
-	} else { // 如果未初始化
-		return fmt.Errorf("qdrant存储服务未初始化")
-	}
-
-	// --- 重新进入事务，执行数据库写操作 ---
-	tx := rp.Storage.MySQL.DB().WithContext(ctx).Begin()
-	if tx.Error != nil {
-		return tx.Error
-	}
-	defer tx.Rollback()
-
-	// 执行LLM处理的数据库事务
-	err = rp._executeLLMProcessingTransaction(ctx, tx, message, qdrantChunks, floatEmbeddings, sections, basicInfo, parsedText, pointIDs)
 	if err != nil {
 		return err
 	}
 
-	if err = tx.Commit().Error; err != nil {
-		// 最终失败状态由具体的失败点决定，这里只记录通用失败
-		rp.logInfo("[ProcessLLMTasks] 提交事务失败 for %s: %v", message.SubmissionUUID, err)
-		// 最终的失败状态更新，如果之前的步骤没有成功更新的话
-		finalErrUpdate := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, message.SubmissionUUID, constants.StatusLLMProcessingFailed)
-		if finalErrUpdate != nil { // 如果更新失败
-			rp.logInfo("在最终更新状态为 LLM_PROCESSING_FAILED 时出错 for %s: %v", message.SubmissionUUID, finalErrUpdate)
-		}
-		return err // 返回错误
-	}
-
-	rp.logDebug("[ProcessLLMTasks] 成功完成LLM处理流程 for %s", message.SubmissionUUID)
-	return nil // 成功完成
+	// 5. 使用Saga模式执行分布式事务
+	return rp.executeSagaTransaction(ctx, message, qdrantChunks, floatEmbeddings, sections, basicInfo, parsedText)
 }
 
 func (rp *ResumeProcessor) _downloadAndChunkResume(ctx context.Context, message storagetypes.ResumeProcessingMessage) (string, []*types.ResumeSection, map[string]string, error) { // 下载并分块简历
@@ -1018,4 +955,404 @@ func CreateProcessor(ctx context.Context, compOpts []ComponentOpt, setOpts []Set
 
 	// 创建处理器
 	return NewResumeProcessorV2(components, settings), nil
+}
+
+// SagaStep 定义Saga模式中的一个步骤
+type SagaStep struct {
+	Name       string       // 步骤名称，用于日志和调试
+	Execute    func() error // 执行函数
+	Compensate func() error // 补偿函数
+	executed   bool         // 是否已执行成功
+}
+
+// SagaTransaction Saga事务管理器
+type SagaTransaction struct {
+	steps  []SagaStep
+	logger *log.Logger
+}
+
+// NewSagaTransaction 创建新的Saga事务
+func NewSagaTransaction(logger *log.Logger) *SagaTransaction {
+	return &SagaTransaction{
+		steps:  make([]SagaStep, 0),
+		logger: logger,
+	}
+}
+
+// AddStep 添加Saga步骤
+func (s *SagaTransaction) AddStep(step SagaStep) {
+	s.steps = append(s.steps, step)
+}
+
+// Execute 执行Saga事务，如果任何步骤失败则执行补偿
+func (s *SagaTransaction) Execute() error {
+	executedSteps := make([]int, 0, len(s.steps))
+
+	// 顺序执行所有步骤
+	for i, step := range s.steps {
+		s.logger.Printf("[Saga] 执行步骤 %d: %s", i+1, step.Name)
+
+		if err := step.Execute(); err != nil {
+			s.logger.Printf("[Saga] 步骤 %d (%s) 执行失败: %v", i+1, step.Name, err)
+
+			// 执行补偿操作（相反顺序）
+			s.compensate(executedSteps)
+			return fmt.Errorf("Saga事务失败在步骤 %s: %w", step.Name, err)
+		}
+
+		s.steps[i].executed = true
+		executedSteps = append(executedSteps, i)
+		s.logger.Printf("[Saga] 步骤 %d (%s) 执行成功", i+1, step.Name)
+	}
+
+	s.logger.Printf("[Saga] 所有 %d 个步骤执行成功", len(s.steps))
+	return nil
+}
+
+// compensate 执行补偿操作
+func (s *SagaTransaction) compensate(executedSteps []int) {
+	s.logger.Printf("[Saga] 开始补偿操作，需要补偿 %d 个步骤", len(executedSteps))
+
+	// 相反顺序执行补偿
+	for i := len(executedSteps) - 1; i >= 0; i-- {
+		stepIndex := executedSteps[i]
+		step := s.steps[stepIndex]
+
+		s.logger.Printf("[Saga] 补偿步骤 %d: %s", stepIndex+1, step.Name)
+
+		if step.Compensate != nil {
+			if err := step.Compensate(); err != nil {
+				s.logger.Printf("[Saga] 补偿步骤 %d (%s) 失败: %v", stepIndex+1, step.Name, err)
+				// 补偿失败也要继续，避免系统进入不可恢复状态
+			} else {
+				s.logger.Printf("[Saga] 补偿步骤 %d (%s) 成功", stepIndex+1, step.Name)
+			}
+		} else {
+			s.logger.Printf("[Saga] 步骤 %d (%s) 无需补偿", stepIndex+1, step.Name)
+		}
+	}
+}
+
+// getProcessingStatusFromRedis 从Redis获取处理状态
+func (rp *ResumeProcessor) getProcessingStatusFromRedis(ctx context.Context, submissionUUID string) (string, bool, error) {
+	cacheKey := fmt.Sprintf("processing_status:%s", submissionUUID)
+
+	status, err := rp.Storage.Redis.Get(ctx, cacheKey)
+	if err != nil {
+		if err.Error() == "redis: nil" { // Redis中不存在
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("从Redis获取状态失败: %w", err)
+	}
+
+	return status, true, nil
+}
+
+// setProcessingStatusToRedis 设置处理状态到Redis
+func (rp *ResumeProcessor) setProcessingStatusToRedis(ctx context.Context, submissionUUID, status string) error {
+	cacheKey := fmt.Sprintf("processing_status:%s", submissionUUID)
+
+	// 设置30分钟过期时间，避免长期不一致
+	return rp.Storage.Redis.Set(ctx, cacheKey, status, 30*time.Minute)
+}
+
+// acquireProcessingLock 获取处理锁
+func (rp *ResumeProcessor) acquireProcessingLock(ctx context.Context, submissionUUID string) (string, error) {
+	lockKey := fmt.Sprintf("processing_lock:%s", submissionUUID)
+
+	// 尝试获取分布式锁，1分钟过期
+	return rp.Storage.Redis.AcquireLock(ctx, lockKey, 1*time.Minute)
+}
+
+// releaseProcessingLock 释放处理锁
+func (rp *ResumeProcessor) releaseProcessingLock(ctx context.Context, submissionUUID, lockValue string) error {
+	lockKey := fmt.Sprintf("processing_lock:%s", submissionUUID)
+
+	released, err := rp.Storage.Redis.ReleaseLock(ctx, lockKey, lockValue)
+	if err != nil {
+		return fmt.Errorf("释放锁失败: %w", err)
+	}
+
+	if !released {
+		rp.logDebug("[ProcessLLMTasks] 锁已被其他进程释放或过期: %s", submissionUUID)
+	}
+
+	return nil
+}
+
+// checkProcessingStatusWithCache 使用缓存检查处理状态
+func (rp *ResumeProcessor) checkProcessingStatusWithCache(ctx context.Context, submissionUUID string) (string, bool, error) {
+	// 首先尝试获取分布式锁
+	lockValue, err := rp.acquireProcessingLock(ctx, submissionUUID)
+	if err != nil || lockValue == "" {
+		// 无法获取锁，说明其他进程正在处理
+		rp.logDebug("[ProcessLLMTasks] 无法获取处理锁，跳过处理: %s", submissionUUID)
+		return "", false, fmt.Errorf("无法获取处理锁")
+	}
+
+	// 确保释放锁
+	defer func() {
+		if releaseErr := rp.releaseProcessingLock(ctx, submissionUUID, lockValue); releaseErr != nil {
+			rp.logDebug("[ProcessLLMTasks] 释放锁时出错: %v", releaseErr)
+		}
+	}()
+
+	// 1. 先从Redis缓存读取状态
+	cachedStatus, found, err := rp.getProcessingStatusFromRedis(ctx, submissionUUID)
+	if err != nil {
+		rp.logDebug("[ProcessLLMTasks] Redis读取状态失败，回退到MySQL: %v", err)
+	} else if found {
+		// 缓存命中，检查状态是否允许处理
+		if !constants.IsStatusAllowed(cachedStatus, constants.AllowedStatusesForLLM) {
+			rp.logDebug("[ProcessLLMTasks] Redis缓存状态不允许处理: %s, 状态: %s", submissionUUID, cachedStatus)
+			return cachedStatus, false, nil
+		}
+
+		rp.logDebug("[ProcessLLMTasks] Redis缓存状态允许处理: %s, 状态: %s", submissionUUID, cachedStatus)
+		return cachedStatus, true, nil
+	}
+
+	// 2. 缓存未命中，从MySQL读取
+	var submission models.ResumeSubmission
+	err = rp.Storage.MySQL.DB().WithContext(ctx).
+		Where("submission_uuid = ?", submissionUUID).
+		First(&submission).Error
+
+	if err != nil {
+		return "", false, fmt.Errorf("从MySQL读取状态失败: %w", err)
+	}
+
+	// 3. 将状态写入Redis缓存
+	if cacheErr := rp.setProcessingStatusToRedis(ctx, submissionUUID, submission.ProcessingStatus); cacheErr != nil {
+		rp.logDebug("[ProcessLLMTasks] 写入Redis缓存失败: %v", cacheErr)
+		// 不影响主流程，继续执行
+	}
+
+	// 4. 检查状态是否允许处理
+	allowed := constants.IsStatusAllowed(submission.ProcessingStatus, constants.AllowedStatusesForLLM)
+
+	if !allowed {
+		rp.logDebug("[ProcessLLMTasks] MySQL状态不允许处理: %s, 状态: %s", submissionUUID, submission.ProcessingStatus)
+	} else {
+		rp.logDebug("[ProcessLLMTasks] MySQL状态允许处理: %s, 状态: %s", submissionUUID, submission.ProcessingStatus)
+	}
+
+	return submission.ProcessingStatus, allowed, nil
+}
+
+// updateProcessingStatusWithCache 更新处理状态并同步缓存
+func (rp *ResumeProcessor) updateProcessingStatusWithCache(ctx context.Context, submissionUUID, newStatus string) error {
+	// 首先更新Redis缓存
+	redisErr := rp.setProcessingStatusToRedis(ctx, submissionUUID, newStatus)
+	if redisErr != nil {
+		rp.logDebug("[updateProcessingStatusWithCache] Redis状态更新失败: %v", redisErr)
+	}
+
+	// 检查是否为需要持久化到MySQL的关键状态
+	criticalStatuses := map[string]bool{
+		constants.StatusProcessingCompleted: true,
+		constants.StatusChunkingFailed:      true,
+		constants.StatusVectorizationFailed: true,
+		constants.StatusQdrantStoreFailed:   true,
+		constants.StatusLLMProcessingFailed: true,
+	}
+
+	if criticalStatuses[newStatus] {
+		// 关键状态需要持久化到MySQL
+		err := rp.Storage.MySQL.UpdateResumeProcessingStatus(ctx, submissionUUID, newStatus)
+		if err != nil {
+			rp.logDebug("[updateProcessingStatusWithCache] MySQL状态更新失败: %v", err)
+			return err
+		}
+	}
+
+	// 其他状态只存在Redis缓存中
+	return nil
+}
+
+// executeSagaTransaction 使用Saga模式执行分布式事务
+func (rp *ResumeProcessor) executeSagaTransaction(ctx context.Context, message storagetypes.ResumeProcessingMessage, qdrantChunks []types.ResumeChunk, floatEmbeddings [][]float64, sections []*types.ResumeSection, basicInfo map[string]string, parsedText string) error {
+	saga := NewSagaTransaction(rp.Config.Logger)
+
+	// 用于存储操作结果
+	var pointIDs []string
+	var candidateID string
+	var processedUpdates map[string]interface{}
+
+	// 步骤1: 存储向量到Qdrant
+	saga.AddStep(SagaStep{
+		Name: "StoreVectorsToQdrant",
+		Execute: func() error {
+			if rp.Storage.Qdrant == nil {
+				return fmt.Errorf("qdrant存储服务未初始化")
+			}
+
+			if len(qdrantChunks) > 0 && len(floatEmbeddings) > 0 {
+				var err error
+				pointIDs, err = rp.Storage.Qdrant.StoreResumeVectors(ctx, message.SubmissionUUID, qdrantChunks, floatEmbeddings)
+				if err != nil {
+					rp.logInfo("ProcessLLMTasks: 存储向量到Qdrant失败 for %s: %v", message.SubmissionUUID, err)
+					return fmt.Errorf("存储向量到Qdrant失败: %w", err)
+				}
+				rp.logDebug("[ProcessLLMTasks] 成功存储 %d 个向量到Qdrant for %s", len(pointIDs), message.SubmissionUUID)
+			} else {
+				rp.logInfo("ProcessLLMTasks: 无核心分块可存储到Qdrant (可能只有BASIC_INFO) for %s", message.SubmissionUUID)
+			}
+			return nil
+		},
+		Compensate: func() error {
+			if len(pointIDs) > 0 && rp.Storage.Qdrant != nil {
+				// 删除已存储的向量点
+				err := rp.Storage.Qdrant.DeletePoints(ctx, pointIDs)
+				if err != nil {
+					rp.logInfo("补偿操作：删除Qdrant向量失败 for %s: %v", message.SubmissionUUID, err)
+					return err
+				}
+				rp.logDebug("补偿操作：成功删除Qdrant向量 for %s", message.SubmissionUUID)
+			}
+			return nil
+		},
+	})
+
+	// 步骤2: 开启MySQL事务并处理候选人数据
+	var tx *gorm.DB
+	saga.AddStep(SagaStep{
+		Name: "ProcessCandidateData",
+		Execute: func() error {
+			// 开启数据库事务
+			tx = rp.Storage.MySQL.DB().WithContext(ctx).Begin()
+			if tx.Error != nil {
+				return tx.Error
+			}
+
+			// 查找或创建候选人
+			if basicInfo != nil {
+				email, emailOk := basicInfo["email"]
+				phone, phoneOk := basicInfo["phone"]
+
+				if emailOk && email != "" || phoneOk && phone != "" {
+					candidate, err := rp.Storage.MySQL.FindOrCreateCandidate(ctx, tx, basicInfo)
+					if err != nil {
+						rp.logInfo("ProcessLLMTasks: 查找或创建候选人失败 for %s: %v", message.SubmissionUUID, err)
+						return fmt.Errorf("查找或创建候选人失败: %w", err)
+					}
+					if candidate != nil {
+						candidateID = candidate.CandidateID
+						rp.logDebug("[ProcessLLMTasks] 成功关联候选人 %s for submission %s", candidateID, message.SubmissionUUID)
+					}
+				}
+			}
+			return nil
+		},
+		Compensate: func() error {
+			if tx != nil {
+				tx.Rollback()
+				rp.logDebug("补偿操作：回滚MySQL事务 for %s", message.SubmissionUUID)
+			}
+			return nil
+		},
+	})
+
+	// 步骤3: 保存简历分块到MySQL
+	saga.AddStep(SagaStep{
+		Name: "SaveResumeChunks",
+		Execute: func() error {
+			if err := rp.Storage.MySQL.SaveResumeChunks(tx, message.SubmissionUUID, sections, pointIDs); err != nil {
+				rp.logInfo("ProcessLLMTasks: 保存简历分块到MySQL失败 for %s: %v", message.SubmissionUUID, err)
+				return fmt.Errorf("保存简历分块到MySQL失败: %w", err)
+			}
+			rp.logDebug("[ProcessLLMTasks] 成功保存 %d 个简历分块信息到MySQL for %s, 其中 %d 个核心分块也写入了向量数据库",
+				len(sections), message.SubmissionUUID, len(pointIDs))
+			return nil
+		},
+		Compensate: func() error {
+			// MySQL事务回滚会自动清理这些数据
+			return nil
+		},
+	})
+
+	// 步骤4: 更新ResumeSubmission记录
+	saga.AddStep(SagaStep{
+		Name: "UpdateResumeSubmission",
+		Execute: func() error {
+			// 准备最终的数据库更新
+			processedUpdates = rp._prepareFinalDBUpdates(basicInfo, pointIDs, candidateID)
+
+			if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Updates(processedUpdates).Error; err != nil {
+				rp.logInfo("ProcessLLMTasks: 最终更新数据库失败 for %s: %v", message.SubmissionUUID, err)
+				return fmt.Errorf("最终更新数据库失败: %w", err)
+			}
+
+			// 如果有指定目标岗位，则保存匹配评估结果
+			if message.TargetJobID != "" {
+				if err := rp._saveMatchEvaluation(ctx, tx, message, parsedText); err != nil {
+					// 这个失败不影响整体流程，记录日志后继续
+					log.Printf("WARNING: 保存JD匹配评估失败 for %s, JobID %s: %v", message.SubmissionUUID, message.TargetJobID, err)
+				}
+			}
+
+			// 更新为最终成功状态
+			if err := tx.Model(&models.ResumeSubmission{}).Where("submission_uuid = ?", message.SubmissionUUID).Update("processing_status", constants.StatusProcessingCompleted).Error; err != nil {
+				rp.logInfo("ProcessLLMTasks: 更新最终成功状态失败 for %s: %v", message.SubmissionUUID, err)
+				return fmt.Errorf("更新最终成功状态失败: %w", err)
+			}
+
+			return nil
+		},
+		Compensate: func() error {
+			// MySQL事务回滚会自动清理这些数据
+			return nil
+		},
+	})
+
+	// 步骤5: 提交MySQL事务
+	saga.AddStep(SagaStep{
+		Name: "CommitTransaction",
+		Execute: func() error {
+			if err := tx.Commit().Error; err != nil {
+				rp.logInfo("[ProcessLLMTasks] 提交事务失败 for %s: %v", message.SubmissionUUID, err)
+				return fmt.Errorf("提交事务失败: %w", err)
+			}
+			return nil
+		},
+		Compensate: func() error {
+			// 事务已提交，无法回滚，但已经是最后一步
+			return nil
+		},
+	})
+
+	// 步骤6: 更新Redis状态缓存
+	saga.AddStep(SagaStep{
+		Name: "UpdateRedisStatus",
+		Execute: func() error {
+			err := rp.setProcessingStatusToRedis(ctx, message.SubmissionUUID, constants.StatusProcessingCompleted)
+			if err != nil {
+				rp.logDebug("更新Redis状态缓存失败，但不影响整体成功: %v", err)
+				// Redis失败不影响整体成功
+			}
+			return nil
+		},
+		Compensate: func() error {
+			// 清除Redis状态
+			err := rp.setProcessingStatusToRedis(ctx, message.SubmissionUUID, constants.StatusLLMProcessingFailed)
+			if err != nil {
+				rp.logDebug("补偿操作：清除Redis状态失败: %v", err)
+			}
+			return nil
+		},
+	})
+
+	// 执行Saga事务
+	err := saga.Execute()
+	if err != nil {
+		// 更新失败状态
+		updateErr := rp.updateProcessingStatusWithCache(ctx, message.SubmissionUUID, constants.StatusLLMProcessingFailed)
+		if updateErr != nil {
+			rp.logInfo("在最终更新状态为 LLM_PROCESSING_FAILED 时出错 for %s: %v", message.SubmissionUUID, updateErr)
+		}
+		return fmt.Errorf("Saga事务执行失败: %w", err)
+	}
+
+	rp.logDebug("[ProcessLLMTasks] 成功完成LLM处理流程 for %s", message.SubmissionUUID)
+	return nil
 }
